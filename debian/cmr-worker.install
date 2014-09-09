@@ -1,0 +1,4 @@
+usr/bin/cmr-worker
+usr/bin/cmr-pipe
+usr/bin/cmr-bucket
+usr/bin/cmr-merge

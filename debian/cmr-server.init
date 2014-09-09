@@ -1,0 +1,202 @@
+#!/bin/bash
+
+### BEGIN INIT INFO
+# Provides:        cmr-server
+# Required-Start:  $network $remote_fs $syslog
+# Required-Stop:   $network $remote_fs $syslog
+# Default-Start:   2 3 4 5
+# Default-Stop:    0 1 6
+# Short-Description: Start Cluster Map Reduce Server
+### END INIT INFO
+
+PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin:/usr/local/sbin
+. /lib/lsb/init-functions
+
+if [ "$(id -u)" -ne "0" ]; then
+  echo "FATAL: must run as root, exiting.." >&2
+  exit 1
+fi
+
+RED='\e[1;31m'
+GREEN='\e[1;32m'
+NC='\e[0m'
+
+SERVICES=(server caster)
+PIDBASE=/var/run/cmr
+LOGBASE=/var/log/cmr
+PIDFILESERVER=${PIDBASE}/server.pid
+LOGFILESERVER=${LOGBASE}/server.log
+
+PIDFILECASTER=${PIDBASE}/caster.pid
+LOGFILECASTER=${LOGBASE}/caster.log
+
+NAME=""
+LOGFILE=""
+PID=""
+PIDFILE=""
+
+PIDSERVER=""
+if [ -r ${PIDFILESERVER} ]; then
+  PIDSERVER="$(cat ${PIDFILESERVER})"
+fi
+
+PIDCASTER=""
+if [ -r ${PIDFILECASTER} ]; then
+  PIDCASTER="$(cat ${PIDFILECASTER})"
+fi
+
+CONFIG="/etc/cmr/config.ini"
+
+[ -d ${LOGBASE} ] || mkdir -p ${LOGBASE}
+[ -d ${PIDBASE} ] || mkdir -p ${PIDBASE}
+
+if [ ! -r ${CONFIG} ]; then
+  /bin/echo -e "${RED}Failed to read configration file. Exiting...${NC}" >&2
+  exit 1
+fi
+
+function ok() {
+  echo -e " ${GREEN}ok${NC}"
+}
+
+function fail() {
+  echo -e " ${RED}failed${NC}"
+}
+
+function set_service() {
+  if [ "$1" == "server" ]; then
+    PID=${PIDSERVER}
+    PIDFILE=${PIDFILESERVER}
+    LOGFILE=${LOGFILESERVER}
+    NAME="cmr-server"
+  elif [ "$1" == "caster" ]; then
+    PID=${PIDCASTER}
+    PIDFILE=${PIDFILECASTER}
+    LOGFILE=${LOGFILECASTER}
+    NAME="cmr-caster"
+  fi
+}
+
+function service_start() {
+  local RETVAL=-1
+  if service_status; then
+    echo -ne " * ${NAME} (${PID}) is already running" && ok
+    RETVAL=0
+  else
+    echo " * ${NAME} was not running"
+    echo -ne "   - Starting..."
+    ${NAME} --config ${CONFIG} \
+            --log ${LOGFILE} > /dev/null 2>&1 &
+
+    echo $! > $PIDFILE &
+
+    if service_status; then
+      fail
+      rm -f ${PIDFILE} 2> /dev/null
+      RETVAL=1
+    else
+      ok
+      RETVAL=0
+    fi
+  fi
+
+  return $RETVAL
+}
+
+function service_stop() {
+  local RETVAL=-1
+  if service_status; then
+    echo " * ${NAME} (${PID}) is running"
+    echo -ne "   - Stopping..."
+    kill $(cat $PIDFILE 2> /dev/null)
+    rm -f $PIDFILE 2> /dev/null
+
+    if service_status; then
+      fail
+      RETVAL=1
+    else
+      ok
+      RETVAL=0
+    fi
+  else
+    echo -ne " * ${NAME} was not running" && ok
+    RETVAL=0
+  fi
+
+  return $RETVAL
+}
+
+function service_restart() {
+  local RETVAL=-1
+  if service_stop; then
+    service_start
+    RETVAL=$?
+  else
+    RETVAL=1
+  fi
+
+  return $RETVAL
+}
+
+function service_status() {
+  local RETVAL=-1
+  if [ ! -r $PIDFILE ]; then
+    RETVAL=1
+  elif ( kill -0 $(cat $PIDFILE 2> /dev/null) 2> /dev/null ); then
+    RETVAL=0
+  else
+    rm -f $PIDFILE 2> /dev/null
+    RETVAL=1
+  fi
+
+  return $RETVAL
+}
+
+set_service "server"
+if [ -r /etc/default/${NAME} ]; then
+  . /etc/default/${NAME}
+fi
+
+RETVAL=-1
+case $1 in
+  start) # start the service
+    set_service "caster"
+    service_start
+    set_service "server"
+    service_start
+    RETVAL=$?
+  ;;
+  stop) # stop the service
+
+    set_service "server"
+    service_stop
+    set_service "caster"
+    service_stop
+    RETVAL=$?
+  ;;
+  restart) # stop and restart the service if the service is already running, otherwise start the service
+
+    set_service "server"
+    service_restart
+    RETVAL=$?
+  ;;
+  status) # print the current status of the service
+    RETVAL=0
+    for SERVICE in "${SERVICES[@]}"
+    do
+      set_service "${SERVICE}"
+      echo -en " * ${NAME} (${PID}) is "
+      if service_status; then
+        echo -en "running" && ok
+      else
+        echo -en "not running" && fail
+      fi
+    done
+  ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status}" >&2
+    RETVAL=2
+  ;;
+esac
+
+exit $RETVAL

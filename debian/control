@@ -1,0 +1,51 @@
+Source: cmr
+Priority: extra
+Maintainer: Nickolas Wood <nwood@chitika.com>
+Build-Depends: debhelper (>= 9)
+Standards-Version: 3.9.5
+Section: chitika
+
+Package: cmr-client
+Section: chitika
+Depends: ${perl:Depends}, cmr-lib, cmr-utils, libdata-guid-perl, libdate-calc-perl
+Architecture: all
+Description: Cluster Map Reduce Client
+ The cmr-client package provides clients for the Cluster Map
+ Reduce Server (cmr-server) which is capable of load balancing
+ client requests across any number of connected Cluster Map 
+ Reduce Worker (cmr-worker) instances.
+
+Package: cmr-server
+Section: chitika
+Depends: ${perl:Depends}, cmr-lib
+Architecture: all
+Description: Cluster Map Reduce Server
+ The cmr-server package provides a server capable of servicing
+ requests from Cluster Map Reduce Clients (cmr-client). Client
+ requests are load balanced across any number of Cluster Map
+ Reduce Workers (cmr-worker) connected to the cmr-server.
+
+Package: cmr-worker
+Section: chitika
+Depends: ${perl:Depends}, ${shlibs:Depends}, cmr-lib, cmr-utils, pigz, gzip
+Architecture: any
+Description: Cluster Map Reduce Worker
+ The cmr-worker package provides a worker that services requests
+ from the Cluster Map Reduce Server (cmr-server). 
+
+Package: cmr-utils
+Section: chitika
+Depends: ${shlibs:Depends}
+Architecture: any
+Description: Cluster Map Reduce Utilities
+ The cmr-utils package provides utilities that both the client
+ and worker packages require.
+
+Package: cmr-lib
+Section: chitika
+Depends: ${perl:Depends}, libnanomsg0, libnanomsg-raw-perl, libjson-xs-perl, libgetopt-long-descriptive-perl, libdate-manip-perl, libconfig-tiny-perl, liblog-log4perl-perl, libuuid-perl
+Architecture: all
+Description: Cluster Map Reduce Utilities
+ The cmr-lib package provides libraries needed by cmr services
+ provided by other cmr packages.
+
