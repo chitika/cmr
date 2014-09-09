@@ -1,0 +1,523 @@
+#!/usr/bin/perl
+
+#
+#   Copyright (C) 2014 Chitika Inc.
+#
+#   This file is a part of Cmr
+#
+#   Cmr is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation, either version 3 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+use strict;
+use warnings;
+use Data::GUID;
+use Date::Manip qw(UnixDate);
+use Date::Calc qw(Date_to_Time Delta_Days);
+use Getopt::Long qw(:config no_ignore_case bundling pass_through);
+use File::Basename qw(dirname);
+use Cwd qw(abs_path);
+use lib  dirname(abs_path(__FILE__))."/../lib";
+use Cmr::StartupUtils ();
+
+$| = 1;
+
+
+# The mess below splits a date range into parts that can be represented by glob patterns ( Sorry about the variable names )
+# The code isn't all that understandable so here's an attempt to explain it
+#
+# Each unit in the time range is broken down into three parts, 
+# an incomplete left and right part which cannot be represented by a wildcard in a glob
+# and a middle part which can be represnted by a wildcard in a glob
+#
+# given a range 2014-01-01 03:23:14 -> 2014-01-04 01:16:22
+# the following subranges are generated
+#
+# PART      UNIT      RANGE                                        GLOB
+# LEFT    | seconds | 2014-01-01 03:23:14 -> 2014-01-01 03:24:60 | 2014-01-01 03:23:{14-59}
+# LEFT    | minutes | 2014-01-01 03:24:00 -> 2014-01-01 03:60:60 | 2014-01-01 03:{24-59}:*
+# LEFT    | hours   | 2014-01-01 04:00:00 -> 2014-01-01 24:60:60 | 2014-01-01 {4-23}:*:*
+# MIDDLE  | days    | 2014-01-02 00:00:00 -> 2014-01-03 24:60:60 | 2014-01-{2,3} *:*:*
+# RIGHT   | hours   | 2014-01-04 00:00:00 -> 2014-01-04 00:60:60 | 2014-01-04 00:*:*
+# RIGHT   | minutes | 2014-01-04 01:00:00 -> 2014-01-04 01:15:60 | 2014-01-04 01:{0-15}:*
+# RIGHT   | seconds | 2014-01-04 01:16:00 -> 2014-01-04 01:16:22 | 2014-01-04 01:16:{0-21}
+# 
+
+my @thresh_lo = (0,1,1,0,0,0);
+my @thresh_hi = (9001,13,32,24,60,60);
+
+use constant {
+    LEFT => 0,
+    RIGHT => 1,
+    MIDDLE => 2,
+};
+
+sub get_ranges {
+    my ($start_ref, $end_ref, $side) = @_;
+    $side //= 0;
+
+    my @start = @$start_ref;
+    my @end = @$end_ref;
+
+    my @d;
+    my @results;
+    my $i = 0;
+
+    return if @start ~~ @end;
+
+    while (@start) {
+        my $s = shift(@start);
+        my $e = shift(@end);
+
+        if ($s == $e) {
+            # do nothing
+            push @d, $s;
+            $i++;
+        } else {
+            # split into three ranges
+
+            return if $s == 0 && $e == $thresh_hi[$i] && @start ~~ @thresh_lo[($i+1) .. $#thresh_lo];
+            $i++;
+
+# part 1 - left
+            my $s1 = $s;
+            my $e1 = $s;
+
+# part 2 - middle
+            my $s2 = $s;
+            my $e2 = $e-1;
+
+            if ( $side == &LEFT ) {
+              $s2 = $s+1;
+            } elsif ( $side == &RIGHT ) {
+              $s2 = $s+1;
+              $e2 = $e;
+            }
+
+# part 3 - right
+            my $s3 = $e;
+            my $e3 = $e;
+
+            if ( $e1 < $e && $side != &MIDDLE) { # case 1
+                my $ns = [@d,$s1,@start[0 .. $#start]];
+                my $ne = [@d,$e1,@thresh_hi[$i .. $#thresh_hi]];
+
+                my @ranges = get_ranges($ns, $ne, &RIGHT);
+                push @results, @ranges if @ranges;
+            }
+
+            if ( $s3 >= 0 && $s3 != $s1 && $side != &RIGHT) { # case 3
+                my $ns = [@d,$s3,@thresh_lo[$i .. $#thresh_lo]];
+                my $ne = [@d,$e3,@end[0 .. $#end]];
+
+                my @ranges = get_ranges($ns, $ne, &MIDDLE);
+                push @results, @ranges if @ranges;
+            }
+
+            if ($e2 < $s) {
+                return @results;
+            }
+
+            my @mid_start = (@d,$s2,@thresh_lo[$i .. $#thresh_lo]);
+            my @mid_end   = (@d,$e2,@thresh_hi[$i .. $#thresh_hi]);
+
+            # make sure we're using properly formatted isodate
+            for my $i (1 .. $#mid_start) {
+                $mid_start[$i] = ($mid_start[$i] < 10) ? "0".int($mid_start[$i]) : $mid_start[$i];
+                $mid_end[$i]   = ($mid_end[$i] < 10)   ? "0".int($mid_end[$i])   : $mid_end[$i];
+            }
+
+            if ( @start ~~ @thresh_lo[$i .. $#thresh_lo] || $side == &MIDDLE ) {
+                @mid_start = (@d,$s,@thresh_lo[$i .. $#thresh_lo]);
+            }
+
+
+            if (fmtdate(@mid_start) le fmtdate(@mid_end)) {
+                push @results, [\@mid_start, \@mid_end];
+            }
+
+            return @results; #  case 2
+        }
+    }
+
+    return @results;
+}
+
+sub fmtdate {
+    return "$_[0]-$_[1]-$_[2] $_[3]:$_[4]:$_[5]";
+}
+
+sub genList
+{
+    my $arr_ref = shift;
+    my $things = "";
+    foreach my $thing (@{$arr_ref})
+    {
+        $things .= "$thing,";
+    }
+
+    chop ($things);
+
+    if ($things eq "")
+    {
+        $things = "*";
+    }
+
+    if ($things =~ /,/)
+    {
+        $things = "{$things}";
+    }
+
+    return $things;
+}
+
+sub help
+{
+    my $msg = shift;
+
+    if (defined ($msg))
+    {
+        print "\n$msg\n\n";
+    }
+
+    print STDERR "\nUSAGE:
+
+cget --select --from --between [--filter] [--join] [--output] [--verbose] [--help]
+
+FLAGS:
+
+  --select                  Fields to search for, comma delimited
+  --from                    Category to search
+  --between                 Dates to start search between: takes form \"<start date> and <end date>\"
+  --filter                  Filter: takes form +|-<field>:<literal> or +|-<field>:/<pattern>/
+  --join                    Join multiple FROM parameters on a specified relationship: takes form \"<joinkey for FROM #1><><joinkey for FROM #2>...\"
+                                The \"<>\" between joinkeys is important
+  --output                  Output directory within gluster
+  --verbose                 Enable CMR verbosity
+  --help                    Print this help
+
+
+EXAMPLE:
+
+cget --select \"day,type\" --from \"purchases\" --between \"2014-01-01 03:07:57 and 2014-01-05 01:26:05\" --filter \"+type:banana,+type:orange\"
+
+NOTES:
+
+* If you do not specify an output, cget will work like cgrep, and send the job output to STDOUT
+* --select, --from, and --filter params are paired on a first seen basis. This allows you to have multiples of each.
+* The \"<>\" symbol between joinkeys denotes an outer join. This is the only type of join currently supported\n\n";
+
+    exit (1);
+}
+
+my %inputsMap = ();
+my $end = "> /dev/null 2>&1";
+my $beaconInterval = 6;
+my ($help, $numFields, $deltaDays, $confirm, $numAggregates) = (0) x 5;
+my ($filters, $joinKeys, $aggregates, $inputs, $output, $mapRules, $verbose, $finalReduce, $joinReduce, $commonReduce, $reduce, $bucketFlag) = ("") x 12;
+my (@categories, @fields, @startDates, @endDates, @dateRanges, @filters, @joinKeys) = () x 8;
+
+GetOptions(
+    's|select=s'     => \@fields,
+    'f|from=s'       => \@categories,
+    'b|between=s'    => \@dateRanges,
+    'F|filter=s'     => \@filters,
+    'j|join=s'       => \$joinKeys,
+    'o|output=s'     => \$output,
+    'v|verbose'      => \$verbose,
+    'h|help'         => \$help,
+);
+
+my ($log, $config) = Cmr::StartupUtils::script_init({
+    'config' => "/etc/cmr/config.ini",
+    'no_lock' => 1,
+});
+
+if ($help)
+{
+    &help ();
+}
+
+if ((! exists ($categories[0])) or
+    (! exists ($fields[0])) or
+    (! exists  ($dateRanges[0])))
+{
+    &help ("required parameter's incomplete");
+}
+
+else
+{
+    $numAggregates = scalar (@categories);
+}
+
+if ($verbose ne "")
+{
+    $verbose = "-v";
+    $end = "";
+}
+
+foreach my $range (@dateRanges)
+{
+    my @range = split (/\ and\ /, $range);
+    if ((! exists ($range[0])) or
+        (! exists ($range[1])))
+    {
+        &help ("detected malformed --range param");
+    }
+
+    push (@startDates, $range[0]);
+    push (@endDates, $range[1]);
+}
+
+if ($#startDates < $#endDates)
+{
+    &help ("detected --end-date param without matching --start-date param");
+}
+
+if ($#startDates > $#endDates)
+{
+    &help ("detected --start-date param without matching --end-date param");
+}
+
+foreach my $field (@fields)
+{
+    my @fieldParts = split (/,/, $field);
+    if (!$numFields)
+    {
+        $numFields = scalar (@fieldParts);
+    }
+
+    elsif ($numFields != scalar (@fieldParts))
+    {
+        &help ("number of fields must be equal in the case of multiple category search");
+    }
+}
+
+for (my $i = 0; $i <= $#filters; $i++)
+{
+    my @discreteFilters = split (/,/, $filters[$i]);
+
+    foreach my $filter (@discreteFilters)
+    {
+        if (($filter !~ /\:/) and
+            (($filter !~ /\+/) or
+             ($filter !~ /-/)))
+        {
+            &help ("detected improperly formatted include filter");
+        }
+    }
+}
+
+for my $idx (1 .. $numAggregates - length($aggregates)) {
+    # default to sum
+    $aggregates .= "s";
+}
+
+$commonReduce = "cmr-reduce $aggregates";
+$reduce = "--reducer '$commonReduce'";
+
+if ($joinKeys ne "")
+{
+    if ($joinKeys =~ /<>/)
+    {
+        @joinKeys = split (/<>/, $joinKeys);
+    }
+
+    else
+    {
+        &help ("detected improperly formatted joinkey relationship");
+    }
+
+    if ($#joinKeys != $#categories)
+    {
+        &help ("detected uneven joinkey relationships\nthe number of joinkeys and --from params must be equal");
+    }
+
+    $joinReduce = "--join-reducer '$commonReduce J'";
+    $bucketFlag = "-B -a $numAggregates";
+}
+
+my $defaultUsed = 0;
+$config->{'cget-table'} //= {};
+$finalReduce = "--final-reducer '$commonReduce -o \"\\t\"'";
+
+for (my $j = 0; $j <= $#categories; $j++)
+{
+    my $isDefault = 0;
+    my $category = $categories[$j];
+
+    $fields[$j] =~ s/,/\ /go;
+
+    my $left   = "_0 " x $j;
+    my $middle = "_1";
+    my $right  = " _0" x ($#categories - $j);
+
+    my $joinKey = "";
+    if (defined ($joinKeys[$j]))
+    {
+        $joinKey = "[$joinKeys[$j]]";
+    }
+
+    $filters[$j] //= "";
+    $filters[$j] =~ s/(?<!\\)\ /\\ /g;
+    $filters[$j] =~ s/,/\ /go;
+
+    if ( exists $config->{'cget-table'}->{$categories[$j]} )
+    {
+        my $id_rules = join(' ', split(/,/, $config->{'cget-table'}->{$categories[$j]}));
+        $mapRules .= " -s \"$id_rules\" \"$joinKey $fields[$j] $left $middle $right $filters[$j]";
+    }
+    else
+    {
+        if ($defaultUsed) {
+            print STDERR "\nDefault mapper already defined, failed to create default mapper for table: $categories[$j]\nTo map multiple tables at once cget-table entries must be created for each table.\n";
+            exit (1);
+        }
+        $mapRules .= "$joinKey $fields[$j] $left $middle $right $filters[$j]";
+        $defaultUsed = 1;
+        $isDefault = 1;
+    }
+
+    for (my $i = 0; $i <= $#startDates; $i++)
+    {
+        my $startDate = UnixDate ($startDates[$i], "%Y-%m-%d-%H-%M-%S");
+        my $endDate = UnixDate ($endDates[$i], "%Y-%m-%d-%H-%M-%S");
+
+        if ($startDate eq $endDate)
+        {
+            print STDERR "\nStart date ($startDates[$i]) and end date ($endDates[$i]) are the same  :/  why!?!\n";
+            exit (1);
+        }
+
+        if ($startDate gt $endDate)
+        {
+            print STDERR "\nStart date is more recent than end date, reversing for you, since I am nice.\n";
+            my $tmp = $startDate;
+            $startDate = $endDate;
+            $endDate = $tmp;
+        }
+    
+        my ($startYear, $startMonth, $startDay, $startHour, $startMin, $startSec) = split (/-/, $startDate);
+        my ($endYear, $endMonth, $endDay, $endHour, $endMin, $endSec) = split (/-/, $endDate);
+
+        $deltaDays += Delta_Days ($startYear, $startMonth, $startDay, $endYear, $endMonth, $endDay);
+    
+        if (($deltaDays > 14) and
+            (!$confirm))
+        {
+            print STDERR "\nYou are looking at more then 14 days of data. You must confirm this action\n[y,N] ";
+            my $response = <STDIN>;
+            chomp ($response);
+    
+            if (($response ne "y") and
+                ($response ne "yes"))
+            {
+                print STDERR "\nconfirmation not acquired, exiting\n";
+                exit (1);
+            }
+    
+            $confirm = 1;
+        }
+
+        my @s = ($startYear, $startMonth, $startDay, $startHour, $startMin, $startSec);
+        my @e = ($endYear, $endMonth, $endDay, $endHour, $endMin, $endSec);
+    
+        my @ranges = get_ranges(\@s,\@e);
+    
+        foreach my $range (@ranges)
+        {
+            my $path = $config->{'warehouse_file_path'};
+            my @parts = ('YEAR','MONTH','DAY','HOUR','MINUTE','SECOND');
+
+            my %replace_fields;
+            $replace_fields{'TABLE'} = $category;
+
+            for my $i (0 .. $#parts) {
+                if ( $range->[0]->[$i] == $thresh_lo[$i] and
+                     $range->[1]->[$i] == $thresh_hi[$i]) {
+                    $replace_fields{$parts[$i]} = "*";
+                }
+                elsif ( $range->[0]->[$i] == $range->[1]->[$i] ) {
+                    $replace_fields{$parts[$i]} = int( $range->[0]->[$i] );
+                    if ($parts[$i] ~~ ['MONTH','DAY'] and $replace_fields{$parts[$i]} < 10) {
+                        $replace_fields{$parts[$i]} = "0".$replace_fields{$parts[$i]};
+                    }
+                }
+                else {
+                    $range->[1]->[$i] = ($range->[1]->[$i] == $thresh_hi[$i]) ? $thresh_hi[$i] - 1 : $range->[1]->[$i];
+                    my @values = ($range->[0]->[$i] .. $range->[1]->[$i]);
+                    if ($parts[$i] ~~ ['MONTH','DAY']) {
+                        for my $idx (0 .. $#values) {
+                            if ($values[$idx] < 10) {
+                                $values[$idx] = "0".$values[$idx];
+                            }
+                        }
+                    }
+                    $replace_fields{$parts[$i]} = "{" . join(',', @values) . "}";
+                }
+            }
+
+            $replace_fields{'DATE'} = "$replace_fields{'YEAR'}-$replace_fields{'MONTH'}-$replace_fields{'DAY'}";
+            $replace_fields{'TIME'} = "$replace_fields{'HOUR'}:$replace_fields{'MINUTE'}:$replace_fields{'SECOND'}";
+            $replace_fields{'DATETIME'} = "$replace_fields{'DATE'}T$replace_fields{'TIME'}";
+
+            my @replace_fields;
+            do {
+                @replace_fields = $path =~ /\$\{([^\}]*)\}/g;
+                for my $field (@replace_fields) {
+                    if ( exists $replace_fields{$field} ) {
+                        $path =~ s/\${${field}}/$replace_fields{$field}/g;
+                    } elsif ( exists $config->{$field} ) {
+                        $path =~ s/\${${field}}/$config->{$field}/g;
+                    }
+                    else {
+                        die "Unknown variable in warehouse_file_path: ${field}\n";
+                    }
+                }
+            } while (@replace_fields);
+
+            if (! $inputsMap{$path})
+            {
+                $inputs .= "--input \"$path\" ";
+                $inputsMap{$path} = 1;
+            }
+        }
+    }
+
+    if (! $isDefault ) {
+        $mapRules .= "\"";
+    }
+}
+
+my $cmd;
+if ($output) {
+    $cmd = "cmr $verbose $inputs --mapper 'cmr-map-json $mapRules' $reduce $joinReduce $finalReduce --output $output $bucketFlag $end";
+}
+else {
+    $cmd = "cmr $verbose $inputs --mapper 'cmr-map-json $mapRules' $reduce $joinReduce $finalReduce --stdout $bucketFlag 2> /dev/null"
+}
+
+#print $cmd, "\n";
+system ($cmd);
+if ($? != 0)
+{
+    print STDERR "\nCMR exited abnormally\n";
+    exit (1);
+}
+
+if ($output and ! -e "$output/output")
+{
+    print STDERR "Job produced no output\n";
+}
+

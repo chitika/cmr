@@ -1,0 +1,179 @@
+#!/usr/bin/perl
+
+#
+#   Copyright (C) 2014 Chitika Inc.
+#
+#   This file is a part of Cmr
+#
+#   Cmr is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation, either version 3 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+use strict;
+use warnings;
+use Data::GUID;
+use Getopt::Long qw(:config no_ignore_case bundling pass_through);
+use JSON::XS ();
+use Digest::MD5 qw(md5_hex);
+
+$| = 1;
+
+sub help
+{
+    my $msg = shift;
+
+    if (defined ($msg))
+    {
+        print "\n$msg\n";
+    }
+
+    print STDERR "\nUSAGE:
+
+cgrep <flags> \"<search pattern>\" \"<search path>\"
+
+FLAGS:
+
+  -i, --ignore-case         ignore case distinctions
+  -E, --extended-regexp     PATTERN is an extended regular expression (ERE)
+  -e, --regexp PATTERN      use PATTERN for matching
+  -P, --perl-regexp         PATTERN is a Perl regular expression
+  -v, --invert-match        select non-matching lines
+  -c, --count               print only a count of matching lines per FILE
+  -o, --only-matching       show only the part of a line matching PATTERN
+  -n, --line-number         print line number with output lines
+  --help                    Print this help\n\n";
+
+    exit ();
+}
+
+my $end = "";
+my $force = 0;
+my $pattern;
+my $input;
+my $guid = Data::GUID->new;
+my $user = `whoami`;
+my $verbose = 0;
+
+chomp ($user);
+
+my $flags = "-";
+my $cFlags = "";
+my %flags = ();
+my @multiPatterns =();
+
+GetOptions(\%flags, 
+    'i|ignore-case',
+    'E|extended-regexp',
+    'F|force',
+    'P|perl-regexp',
+    'v|invert-match',
+    'V|verbose',
+    'c|count',
+    'o|only-matching',
+    'n|line-number',
+    'help',
+);
+
+GetOptions(
+    'e|regexp=s' => \@multiPatterns,
+);
+
+if (exists ($flags{'help'}))
+{
+    &help ();
+}
+
+foreach my $key (sort keys %flags)
+{
+    $flags .= "$key";
+}
+
+%flags = ();
+
+if ($flags =~ /c/)
+{
+    $flags =~ s/c//g;
+    $end = "| wc -l";
+}
+
+if ($flags =~ /F/)
+{
+    $flags =~ s/F//g;
+    $force = 1;
+}
+
+if ($flags =~ /V/)
+{
+    $flags =~ s/V//g;
+    $verbose = 1;
+}
+
+if ($flags ne "-")
+{
+    $cFlags = "--flags \"$flags\"";
+}
+
+else
+{
+    $flags = "";
+}
+
+foreach my $multiPattern (@multiPatterns)
+{
+    $pattern .= " --pattern \"$multiPattern\"";
+}
+
+if (!exists ($multiPatterns[0]))
+{
+    if (exists ($ARGV[0]))
+    {
+        my $leftoverPattern = shift @ARGV;
+        $leftoverPattern =~ s/\"/\\\"/g;
+        $leftoverPattern =~ s/\'/\\\'/g;
+    
+        $pattern .= " --pattern \"$leftoverPattern\"";
+    }
+    
+    else
+    {
+        &help ("ERROR:\nNo search pattern provided");
+    }
+}
+
+if (exists ($ARGV[1]))
+{
+    &help ("ERROR:\nmultiple input paths detected\nyou likely didn't quote your path");
+}
+
+if (exists ($ARGV[0]))
+{
+    $input = $ARGV[0];
+}
+
+else
+{
+    my $grepPatterns = $pattern;
+    $pattern =~ s/--pattern/-e/g;
+    system ("grep $flags $pattern $end");
+    exit ();
+}
+
+my $cmd = "cmr-grep $pattern $cFlags --input \"$input\" --stdout 2> /dev/null";
+system ($cmd);
+
+if ($? != 0) {
+    print STDERR "cmr-grep exited abnormally\n";
+    exit 1;
+}
+

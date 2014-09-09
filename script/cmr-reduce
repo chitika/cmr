@@ -1,0 +1,187 @@
+#!/usr/bin/perl
+=cut
+cmr-reduce - A generic reducer for use with cmr-map-json
+
+Usage: cmr-reduce [<aggregation-types>] [-o "<output-delimiter>"]
+
+Where an aggregation type is one of the following characters
+
+c - Count. Specifies that a column should be counted during aggregation
+s - Sum.   Specifies that a column should be summed during aggregation
+m - min.   Specifies that a column should have its minimum value taken during aggregation
+M - Max.   Specifies that a column should have its maximum value taken during aggreation
+
+--output-delimiter -o  Specify an alternate output delimiter
+
+* NOTE: output delimiter should only be specified on the final reduce stage, as replacing
+* the delimiter will cause subsequent reduces (expecting the original delimiter) to fail.
+
+############
+# Examples #
+
+#** For clarity the delimiter used in examples is a space, in actual use fields 
+#** are delimited by ctrl-A characters [^A] to avoid stripping important characters
+#** from lines during processing...
+
+Aggregate fields are specified from left to right... so
+
+given rows with 3 key fields, and 4 aggregates
+
+foo bar baz 1 2 3 4
+foo bar baz 1 2 3 4
+
+we need to specify 4 aggregation types on the command line to the reducer
+* they can be specified either as a single string or as multiple arguments
+
+cmr-reduce c s m M
+
+which says to count the first, sum the second, min the third, and Max the fourth fields
+producing the following output from the rows given above
+
+foo bar baz  2 4 3 4
+
+
+################
+# Cmr Examples #
+
+Given records with the following format
+
+{
+    "purchased_on" : "2014-08-01",
+    "revenue"      : 0.05,
+    "info" :  {
+        "type" : "orange",
+    }
+}
+
+
+Get  purchased_on, info.type, and a constant 1 for each row where info.type is banana or orange
+cmr --input "<input_glob>" --mapper "cmr-map-json purchased_on info.type _1 +info.type:banana +info.type:orange" --stdout
+
+2014-08-01 orange 1
+2014-08-01 orange 1
+2014-08-01 banana 1
+2014-08-01 orange 1
+
+The purpose of the constant is for aggregation purposes, when passed through cmr-reduce we can get
+the row count of purchased oranges and bananas for the day.
+
+cmr --input "<input_glob>" --mapper "cmr-map-json purchased_on info.type _1 +info.type:banana +info.type:orange" --reducer "cmr-reduce c" --stdout
+
+2014-08-01 orange 3
+2014-08-01 banana 1
+
+Or rather than using a constant we could use the revenue field, and sum the values rather than count them
+
+cmr --input "<input_glob>" --mapper "cmr-map-json purchased_on info.type revenue +info.type:banana +info.type:orange" --reducer "cmr-reduce s" --stdout
+
+2014-08-01 orange 0.15
+2014-08-01 banana 0.05
+
+... Why not just have both!
+cmr --input "<input_glob>" --mapper "cmr-map-json purchased_on info.type _1 revenue +info.type:banana +info.type:orange" --reducer "cmr-reduce cs" --stdout
+
+2014-08-01 orange 3 0.15
+2014-08-01 banana 1 0.05
+
+Replacing output delimiter with tab
+cmr --input '<input_glob>' --mapper 'cmr-map-json purchased_on info.type _1 revenue +info.type:banana +info.type:orange' --reducer 'cmr-reduce cs' --final-reduce 'cmr-reduce cs -o "\t"'--stdout
+
+2014-08-01	orange	3	0.15
+2014-08-01	banana	1	0.05
+
+=cut 
+
+
+use strict;
+use warnings;
+
+use Getopt::Long::Descriptive ();
+my ($opt, $usage) = Getopt::Long::Descriptive::describe_options(
+    '%c %o Populates redshift with first stage map files',
+    ['output-delimiter|o=s',   'specify output delimiter [final-reduce only] or results will be unexpected'],
+);
+
+my $delimiter = "";
+my $join_delimiter = "";
+my $output_delimiter = $opt->{'output_delimiter'} // "";
+if ($output_delimiter eq "\\t") { $output_delimiter = "\t"; }
+
+my $join = 0;
+my @agg_func;
+my %output;
+my %aggregation_functions = (
+    's' => \&agg_sum,
+    'm' => \&agg_min,
+    'M' => \&agg_max,
+);
+
+
+# Get aggregation functions from input
+my (@field_specs) = join('', @ARGV) =~ /([JsmM])/go;
+my $idx=0;
+foreach my $type (@field_specs) {
+    if ($type eq "J") {
+        $join = 1;
+        next;
+    }
+    push @agg_func, $aggregation_functions{$type};
+    $idx++;
+}
+
+if ($join) {
+    # If we're dealing with a join key, use it for aggregation rather than the key fields
+    while (<STDIN>) {
+        chomp();
+        my ($key, $rest) = split(/${join_delimiter}/o, $_, 2);
+        my @in = split(/${delimiter}/o, $rest);
+        foreach my $idx (0 .. $#in) {
+            if ( $idx >= $#in - $#agg_func) {
+                my $agg_idx = $idx - ($#in - $#agg_func);
+                $agg_func[$agg_idx]->($key, $in[$idx], $idx);
+            } else {
+                $output{$key}[$idx] = $in[$idx];
+            }
+        }
+    }
+    foreach my $key ( keys %output ) {
+        $key =~ s/${delimiter}/$output_delimiter/go;
+        print join($join_delimiter, ($key, join($output_delimiter, @{$output{$key}}))), "\n";
+    }
+}
+else {
+    # Not doing a join, key consists of key fields
+    while (<STDIN>) {
+        chomp();
+        my @in = split(/${delimiter}/o, $_);
+        my $key = join(${delimiter}, @in[0 .. $#in - $#agg_func - 1]);
+        foreach my $idx ($#in - $#agg_func .. $#in) {
+            my $agg_idx = $idx - ($#in - $#agg_func);
+            $agg_func[$agg_idx]->($key, $in[$idx], $agg_idx);
+        }
+    }
+    foreach my $key ( keys %output ) {
+        my $src_key = $key;
+        $key =~ s/${delimiter}/$output_delimiter/go;
+        print join($output_delimiter, ($key, @{$output{$src_key}})), "\n";
+    }
+}
+
+sub agg_sum {
+    my ($key, $value, $idx) = @_;
+    $output{$key}[$idx] //= 0;
+    $output{$key}[$idx] = $output{$key}[$idx] + $value;
+}
+
+sub agg_min {
+    my ($key, $value, $idx) = @_;
+    $output{$key}[$idx] //= $value;
+    $output{$key}[$idx] = ( $value < $output{$key}[$idx] ) ? $value : $output{$key}[$idx];
+}
+
+sub agg_max {
+    my ($key, $value, $idx) = @_;
+    $output{$key}[$idx] //= $value;
+    $output{$key}[$idx] = ( $value > $output{$key}[$idx] ) ? $value : $output{$key}[$idx];
+}
+

@@ -1,0 +1,542 @@
+#!/usr/bin/perl
+
+=cut
+cmr-map-json - A mapper that uses a terse dsl to express json mappers
+
+cmr-map-json [args]
+
+arguments to cmr-map-json are order independent (except that select args are evaluated in the order that they appear on the command line)
+
+select        : field_1 field_2 field_3       # fields are emitted in the order that they are specified
+select_array  : field.array.*                 # emits a row per element in the array
+constant      : _1 _2 _3                      # emits the constant following the underscore
+include       : +key:literal                  # include a key's value when it matches a literal value (multiple includes are OR'd together to determine inclusion)
+include       : +key:/regular_expression/     # include a key's value when it matches a regular expression (ditto...)
+include_range : ++key#literal#literal         # include a key's value when it lies between two literal values lexographically (ditto...)
+exclude       : -key:literal                  # exclude a key's value when it matches a literal value (multiple excludes are OR'd together to determine exclusion)
+exclude       : -key:/regular_expression/     # exclude a key's value when it matches a regular expression (ditto...)
+exclude_range : --key#literal#literal         # exclude a key's value when it lies between two literal values lexographically (ditto...)
+
+############
+# Examples #
+
+#** For clarity the delimiter used in examples is a space, in actual use fields
+#** are delimited by ctrl-A characters [^A] to avoid stripping important characters
+#** from lines during processing...
+
+
+Given records with the following format
+
+{ 
+    "purchased_on" : "2014-08-01",
+    "revenue"      : 0.05,
+    "info" :  {
+        "type" : "orange",
+    }
+}
+            
+    
+Get  purchased_on, info.type, and a constant 1 for each row where info.type is banana or orange
+cmr --input "<input_glob>" --mapper "cmr-map-json purchased_on info.type _1 +info.type:banana +info.type:orange" --stdout
+
+2014-08-01 orange 1
+2014-08-01 orange 1
+2014-08-01 banana 1
+2014-08-01 orange 1
+
+The purpose of the constant is for aggregation purposes, when passed through cmr-reduce we can get
+the row count of purchased oranges and bananas for the day.
+
+cmr --input "<input_glob>" --mapper "cmr-map-json purchased_on info.type _1 +info.type:banana +info.type:orange" --reducer "cmr-reduce c" --stdout
+
+2014-08-01 orange 3
+2014-08-01 banana 1
+
+Or rather than using a constant we could use the revenue field, and sum the values rather than count them
+
+cmr --input "<input_glob>" --mapper "cmr-map-json purchased_on info.type revenue +info.type:banana +info.type:orange" --reducer "cmr-reduce s" --stdout
+
+2014-08-01 orange 0.15
+2014-08-01 banana 0.05
+
+=cut
+
+
+use strict;
+use warnings;
+
+binmode STDIN,  ':utf8';
+binmode STDOUT, ':utf8';
+binmode STDERR, ':utf8';
+
+use POSIX qw/strftime/;
+
+use File::Basename qw(dirname);
+use Cwd qw(abs_path);
+use lib  dirname(abs_path(__FILE__))."/../lib";
+use Cmr::JsonUtils ();
+
+my $metare  = qr/(?<!\\)([\|\(\)\[\{\^\$\*\+\?\.])/; # escape regexp meta
+my $emitall = 0;
+
+my $sep = "\cA";
+my $joinsep = "\cB";
+my $null_value = "-";
+
+my @out;
+$out[256] = undef;
+my @join;
+$join[256] = undef;
+
+use constant {
+    TYPE_DIRECT      => 0,
+    TYPE_CONSTANT    => 1,
+};
+
+
+sub InitMapper {
+    my ($id_args, @map_args) = @_;
+
+    my $self = {};
+    my @id_rules;
+
+    my @id_args = split(/(?<!\\)\ /, $id_args);
+    for my $arg (@id_args) {
+        my ($inverted, $key, $filter) = $arg =~ /(\-)?([^:]+):(.+)$/o;
+
+        if ($filter =~ /^\/[^\/]*\/$/) {
+            $filter =~ s/^\/([^\/]*)\/$/$1/o;
+        } else {
+            $filter =~ s/$metare/\\$1/g;
+            $filter = "^${filter}\$";
+        }
+
+        push @id_rules, [$inverted,  &Cmr::JsonUtils::PathSplit($key), $filter];
+    }
+
+    my @arg_select;
+    my @arg_include;
+    my @arg_exclude;
+    my @arg_include_range;
+    my @arg_exclude_range;
+    my @arg_joinkey;
+
+    for my $arg (@map_args) {
+        next if $arg =~ /^\s*$/o;
+        if ($arg =~ /^--/o) {
+            # long opt
+            if ($arg eq "--all") { $emitall = 1; next; }
+        }
+
+        my ($oper) = $arg =~ /^(\[|\~|\+|\-\-?|_)/o;
+        if ( (!$oper) || ($oper eq '_') ) {
+            push @arg_select, $arg;
+        }
+        elsif ($oper eq '++') {
+            push @arg_include_range, $arg;
+        }
+        elsif ($oper eq '+') {
+            push @arg_include, $arg;
+        }
+        elsif ($oper eq '--') {
+            push @arg_exclude_range, $arg;
+        }
+        elsif ($oper eq '-') {
+            push @arg_exclude, $arg;
+        }
+        elsif ($oper eq '[') {
+            push @arg_joinkey, $arg;
+        }
+    }
+
+
+    my %joined;
+    my %selected;
+    my %filtered;
+
+    my %includes;
+    my %excludes;
+    my %include_ranges;
+    my %exclude_ranges;
+    my %needed;
+    my $output_position = 0;
+    my $max_idx_select = 0;
+    my $max_idx_join = 0;
+
+    $output_position = 0;
+    for my $key ( @arg_joinkey ) {
+        $key =~ s/^\[(.*)\]$/$1/;
+        my @srcs = split(/:/, $key);
+        for my $src (@srcs) {
+            &push_path($self, $src, \%joined, \%needed, $output_position);
+            $output_position++;
+        }
+        $needed{$key} = 1;
+    }
+    $max_idx_join = $output_position - 1;
+
+
+    $output_position = 0;
+    for my $key ( @arg_select ) {
+        if ( $key =~ /^_/o ) {
+            $key =~ s/^_(.*)$/$1/;
+            $key //= $null_value;
+            push @{$selected{'leaf'}}, [&TYPE_CONSTANT, $key, $key, 0, $output_position];
+            $output_position++;
+            next;
+        }
+        &push_path($self, $key, \%selected, \%needed, $output_position);
+        $needed{$key} = 1;
+        $output_position++;
+    }
+    $max_idx_select = $output_position - 1;
+
+    for my $arg ( @arg_include ) {
+        my ($key, $filter) = $arg =~ /\+([^:]+):(.+)$/o;
+        $includes{$key} //= [];
+
+        if ($filter =~ /^\/[^\/]*\/$/) {
+            $filter =~ s/^\/([^\/]*)\/$/$1/o;
+            push @{$includes{$key}}, $filter;
+        }
+        else {
+            $filter =~ s/$metare/\\$1/g;
+            $filter = "^${filter}\$";
+            push @{$includes{$key}}, $filter;
+        }
+
+        unless ( $needed{$key} ) {
+            &push_path($self, $key, \%filtered, \%needed );
+            $needed{$key} = 1;
+        }
+    }
+
+    for my $arg ( @arg_exclude ) {
+        my ($key, $filter) = $arg =~ /\-([^:]+):(.+)$/o;
+        $excludes{$key} //= [];
+        if ($filter =~ /^\/[^\/]*\/$/) {
+            $filter =~ s/^\/([^\/]*)\/$/$1/o;
+            push @{$excludes{$key}}, $filter;
+        }
+        else {
+            $filter =~ s/$metare/\\$1/g;
+            $filter = "^${filter}\$";
+            push @{$excludes{$key}}, $filter;
+        }
+
+        unless ( $needed{$key} ) {
+            &push_path($self, $key, \%filtered, \%needed );
+            $needed{$key} = 1;
+
+        }
+    }
+
+    for my $arg ( @arg_include_range ) {
+        my ($key, $delimiter, $filter_lo, $filter_hi) = $arg =~ /\-([\d\w\.]+)(.)([^\/]+)\g2(.+)$/o;
+        $include_ranges{$key} //= [];
+
+        if ($key eq 'date') {
+            $filter_lo =~ s/T/\ /o;
+            $filter_hi =~ s/T/\ /o;
+        }
+
+        push @{$include_ranges{$key}}, {'low'=>$filter_lo, 'high'=>$filter_hi};
+        unless ( $needed{$key} ) {
+            &push_path($self, $key, \%filtered, \%needed);
+            $needed{$key} = 1;
+        }
+    }
+
+    for my $arg ( @arg_exclude_range ) {
+        my ($key, $delimiter, $filter_lo, $filter_hi) = $arg =~ /\-([\d\w\.]+)(.)([^\/]+)\g2(.+)$/o;
+        $exclude_ranges{$key} //= [];
+
+        if ($key eq 'date') {
+            $filter_lo =~ s/T/\ /o;
+            $filter_hi =~ s/T/\ /o;
+        }
+
+        push @{$exclude_ranges{$key}}, {'low'=>$filter_lo, 'high'=>$filter_hi};
+        unless ( $needed{$key} ) {
+            &push_path($self, $key, \%filtered, \%needed);
+            $needed{$key} = 1;
+        }
+    }
+    
+
+
+    my $obj = {
+        "id_rules"       => \@id_rules,
+        "selected"       => \@{$selected{'leaf'}},
+        "array_selected" => \@{$selected{'array'}},
+        "filtered"       => \@{$filtered{'leaf'}},
+        "array_filtered" => \@{$filtered{'array'}},
+        "joined"         => \@{$joined{'leaf'}},
+        "array_joined"   => \@{$joined{'array'}},
+        "includes"       => \%includes,
+        "excludes"       => \%excludes,
+        "include_ranges" => \%include_ranges,
+        "exclude_ranges" => \%exclude_ranges,
+        "max_idx_select"  => $max_idx_select,
+        "max_idx_join"  => $max_idx_join,
+    };
+
+    return bless( $obj );
+}
+
+sub push_path {
+    my ($self, $key, $dst, $needed, $output_position) = @_;
+
+    $output_position //= -1;
+
+    my $is_array = ( $key =~ /\.\*/o ) ? 1 : 0;
+    if ($is_array) {
+        push @{$dst->{'array'}}, [&TYPE_DIRECT, $key, $key, &Cmr::JsonUtils::PathSplit($key), $output_position];
+    }
+    else {
+        push @{$dst->{'leaf'}},  [&TYPE_DIRECT, $key, $key, &Cmr::JsonUtils::PathSplit($key), $output_position];
+    }
+}
+
+sub get_fields {
+    my ($path, $hash, $depth) = @_;
+    my @ret = ();
+    return @ret unless (defined($path));
+
+    $depth //= 0;
+    my $max_depth = scalar(@$path);
+    while ( $max_depth > $depth ) {
+        if (ref($hash) eq 'HASH') {
+            if ( $path->[$depth] eq '*' ) {
+                for my $key (keys %{$hash}) {
+                    push @ret, &get_fields($path, $hash->{$key}, $depth+1);
+                }
+                return @ret;
+            }
+            else {
+                $hash = $hash->{$path->[$depth]};
+            }
+        } elsif ( ref($hash) eq 'ARRAY' ) {
+            if ( $path->[$depth] eq '*' ) {
+                for my $idx (0 .. $#{$hash}) {
+                    push @ret, &get_fields($path, $hash->[$idx], $depth+1);
+                }
+                return @ret;
+            } else {
+                $hash = $hash->[$path->[$depth]];
+            }
+        } else {
+            $hash = undef;
+            last;
+        }
+        ++$depth;
+    }
+
+    push @ret, $hash;
+    return @ret;
+}
+
+sub filter {
+    my ($self, $key, $value) = @_;
+
+    my $included = 0;
+    my $excluded = 0;
+
+    if ( $self->{'includes'}->{$key} ) {
+        for my $filter (@{$self->{'includes'}->{$key}}) {
+            $included = 1 if $value =~ $filter;
+            last if $included;
+        }
+        return 1 unless ( $included );
+    }
+
+    if ( $self->{'excludes'}->{$key} ) {
+        for my $filter (@{$self->{'excludes'}->{$key}}) {
+            $excluded = 1 if $value =~ $filter;
+            last if $excluded;
+        }
+        return 1 if ( $excluded );
+    }
+
+    if ( $self->{'include_ranges'}->{$key} ) {
+        for my $range (@{$self->{'include_ranges'}->{$key}}) {
+            $included = 1 if ( $value ge $range->{'low'} and $value lt $range->{'high'} );
+            last if $included;
+        }
+        return 1 unless $included;
+    }
+
+    if ( $self->{'exclude_ranges'}->{$key} ) {
+        for my $range (@{$self->{'exclude_ranges'}->{$key}}) {
+            $excluded = 1 if ( $value ge $range->{'low'} and $value lt $range->{'high'} );
+            last if $excluded;
+        }
+        return 1 if ( $excluded );
+    }
+
+    return 0;
+}
+
+sub process {
+    my ($self, $json) = @_;
+
+    for my $filtered (@{$self->{'filtered'}}) {
+        my ($type, $src, $dst, $path, $output_position) = @{$filtered};
+        my $value;
+
+        if ($type == &TYPE_DIRECT) {
+            $value = &Cmr::JsonUtils::GetField($path, $json) // $null_value;
+        }
+
+        $value //= $null_value;
+        return if $self->filter($src, $value);
+    }
+
+    for my $select (@{$self->{'selected'}}) {
+        my ($type, $src, $dst, $path, $output_position) = @{$select};
+
+        if ($type == &TYPE_CONSTANT) {
+            $out[$output_position] = $src // $null_value;
+            $out[$output_position] =~ s/${sep}/\ /go; # remove seperator from output fields
+            next;
+        }
+        elsif ($type == &TYPE_DIRECT ) {
+            $out[$output_position] = &Cmr::JsonUtils::GetField($path, $json) // $null_value;
+        }
+
+        $out[$output_position] //= $null_value;   # replace undefined fields
+        return if $self->filter($src, $out[$output_position]);
+        $out[$output_position] =~ s/${sep}/\ /go; # remove seperator from output fields
+    }
+
+    for my $joinkey (@{$self->{'joined'}}) {
+        my ($type, $src, $dst, $path, $output_position) = @{$joinkey};
+
+        if ( $type == &TYPE_DIRECT ) {
+            $join[$output_position] = &Cmr::JsonUtils::GetField($path, $json) // $null_value;
+        }
+
+        $join[$output_position] //= $null_value;       # replace undefined fields
+        return if $self->filter($src, $join[$output_position]);
+        $join[$output_position] =~ s/${joinsep}/\ /go; # remove seperator from output fields
+    }
+
+    for my $idx (0 .. $#{$self->{'array_filtered'}}) {
+        my ($type, $src, $dst, $path, $output_position) = @{$self->{'array_filtered'}->[$idx]};
+        my @filter_values = &get_fields ( $path, $json );
+        my $passed = 0;
+        for my $value (@filter_values) {
+            $value //= $null_value;
+            next if $self->filter ($src, $value);
+            $passed = 1;
+            last;
+        }
+        return if !$passed;
+    }
+
+    $self->process_array ( $json, 0, 0 ); 
+}
+
+sub process_array {
+    my ( $self, $json, $idx_joined, $idx_selected) = @_;
+
+    if ( exists ( $self->{'array_joined'}->[$idx_joined] ) ) {
+        my ($type, $src, $dst, $path, $output_position) = @{$self->{'array_joined'}->[$idx_joined]};
+        my @join_values = &get_fields ( $path, $json );
+        for my $value (@join_values) {
+            $value //= $null_value;       # replace undefined fields
+            next if $self->filter ($src, $value);
+            $value =~ s/${joinsep}/\ /go; # remove join seperator from output fields
+            $join[$output_position] = $value;
+            $self->process_array( $json, $idx_joined+1, $idx_selected );
+        }
+        return;
+    }
+
+    if ( exists ( $self->{'array_selected'}->[$idx_selected] ) ) {
+        my ($type, $src, $dst, $path, $output_position) = @{$self->{'array_selected'}->[$idx_selected]};
+        my @select_values = &get_fields ( $path, $json );
+        for my $value (@select_values) {
+            $value //= $null_value;       # replace undefined fields
+            next if $self->filter ($src, $value);
+            $value =~ s/${sep}/\ /go; # remove seperator from output fields
+            $out[$output_position] = $value;
+            $self->process_array( $json, $idx_joined, $idx_selected+1 );
+        }
+        return;
+    }
+
+    if ($emitall) {
+        print $_;
+    } else {
+        if ($self->{'max_idx_join'} >= 0) {
+            printf("%s${joinsep}%s\n", join(":",@join[0..$self->{"max_idx_join"}]), join($sep, @out[0..$self->{"max_idx_select"}]));
+        } else {
+            printf("%s\n", join($sep, @out[0..$self->{"max_idx_select"}]));
+        }
+    }
+}
+
+sub ProcessJson {
+    my ($mappers, $json) = @_;
+
+    for my $idx (0 .. $#{$mappers}) {
+        my @id_rules = @{$mappers->[$idx]->{'id_rules'}};
+        my $matched = 1;
+
+        for my $rule (@id_rules) {
+            my ($inverted, $key, $filter) = @$rule;
+            my $value = &Cmr::JsonUtils::GetField($key, $json) // $null_value;
+            if ($inverted) {
+                if ( $value =~ /${filter}/ ) {
+                    $matched = 0;
+                    last;
+                }
+            } else {
+                if ( !($value =~ /${filter}/) ) {
+                    $matched = 0;
+                    last;
+                }
+            }
+        }
+        $mappers->[$idx]->process($json) if $matched;
+    }
+}
+
+
+my $mappers = [];
+my @unprocessed_args;
+
+while(@ARGV) {
+    my $arg = shift(@ARGV);
+    last unless defined $arg;
+    if ($arg =~ /^-s$/) {
+        # script flag
+        # format: -s "identification rule" "mapping rule"
+        my $id_args = shift(@ARGV);
+        die "script flag missing table / log relationship" unless defined $id_args;
+        my $map_args = shift(@ARGV);
+        die "script flag missing mapping rules" unless defined $map_args;
+        my @map_args = split(/(?<!\\)\ /, $map_args);
+        push $mappers, &InitMapper($id_args, @map_args);
+    }
+    else {
+        push @unprocessed_args, $arg;
+    }
+}
+
+if (@unprocessed_args) {
+    push $mappers, &InitMapper("", @unprocessed_args);
+}
+
+while(<STDIN>) {
+    chomp();
+    $_ =~ s/^[^{]+({.*})[^}]+$/$1/o; # Try sanitize lines of non-json
+
+    my $json = &Cmr::JsonUtils::Decode($_);
+    next unless $json; # Couldn't parse, pretend it didn't happen
+
+    &ProcessJson($mappers, $json);
+}
+    
+

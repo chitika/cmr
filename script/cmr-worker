@@ -1,0 +1,270 @@
+#!/usr/bin/perl
+
+#
+#   Copyright (C) 2014 Chitika Inc.
+#
+#   This file is a part of Cmr
+#
+#   Cmr is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation, either version 3 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+use strict;
+use warnings;
+
+use File::Basename qw(dirname);
+use Cwd qw(abs_path);
+use lib  dirname(abs_path(__FILE__))."/../lib";
+
+use Digest::MD5 qw(md5_hex);
+
+use Cmr::Types;
+use Cmr::RequestHandler;
+use Cmr::RequestHandler::Bucket;
+use Cmr::RequestHandler::Grep;
+use Cmr::RequestHandler::Stream;
+use Cmr::RequestHandler::Cleanup;
+use Cmr::RequestHandler::Merge;
+use Cmr::StartupUtils ();
+use Cmr::ReactorAsync ();
+
+use Time::HiRes ();
+use threads::shared;
+
+my $tasks_pending :shared;
+my $q               = Thread::Queue->new();
+
+# Initialize all of the request handlers
+my $BucketHandler   = Cmr::RequestHandler::Bucket->new($q);
+my $GrepHandler     = Cmr::RequestHandler::Grep->new($q);
+my $StreamHandler   = Cmr::RequestHandler::Stream->new($q);
+my $CleanupHandler  = Cmr::RequestHandler::Cleanup->new($q);
+my $MergeHandler    = Cmr::RequestHandler::Merge->new($q);
+
+my $handlers = {
+
+  &Cmr::Types::CMR_BUCKET   => sub { $BucketHandler->handle_request(@_); },
+  &Cmr::Types::CMR_GREP     => sub { $GrepHandler->handle_request(@_); },
+  &Cmr::Types::CMR_STREAM   => sub { $StreamHandler->handle_request(@_); },
+  &Cmr::Types::CMR_CLEANUP  => sub { $CleanupHandler->handle_request(@_); },
+  &Cmr::Types::CMR_MERGE    => sub { $MergeHandler->handle_request(@_); },
+
+  &Cmr::Types::CMR_CLEANUP_TEMPORARY => sub {
+    my ($event, $config, $self) = @_;
+    my $task = $event->{'data'};
+
+    $task->{'result'} = &Cmr::Types::CMR_RESULT_FAILURE;
+    $task->{'zerobyte'} = 1;
+    $task->{'started_time'} = Time::HiRes::gettimeofday;
+
+    my $tmp_path = sprintf("/tmp/cmr-%s", $task->{'jid'});
+
+    # A little extra paranoia since we're about to do a remove
+    $tmp_path =~ s/;.*$//go;
+    $tmp_path =~ s/\.\.//go;
+
+    if (-e $tmp_path) {
+        my $timeout = $task->{'deadline'} - Time::HiRes::gettimeofday;
+        if ($timeout < 0) { return $task->{'result'}; }
+        my $cmd = sprintf("timeout -s KILL 10 cmr-pipe --CMR_PIPE_UID %s --CMR_PIPE_GID %s rm -rf %s", $task->{'uid'}, $task->{'gid'}, $tmp_path);
+        my $rc = system($cmd);
+        $task->{'result'} = &Cmr::Types::CMR_RESULT_SUCCESS if $rc == 0;
+    }
+    else {
+        $task->{'result'} = &Cmr::Types::CMR_RESULT_SUCCESS;
+    }
+
+    $q->enqueue($task);
+  },
+
+  &Cmr::Types::CMR_REJECT   => sub {
+    # The reject handler doesn't pass through the default request handler in order to minimize wasted effort
+    my ($event, $config, $self) = @_;
+    my $task = $event->{'data'};
+    $task->{'started_time'} = Time::HiRes::gettimeofday;
+    $task->{'result'} = &Cmr::Types::CMR_RESULT_WORKER_REJECT;
+    $task->{'zerobyte'} = 1;
+    $q->enqueue($task);
+  },
+
+};
+
+my ($log, $config) = Cmr::StartupUtils::script_init({
+    'description' => 'handles cmr client tasks',
+    'config' => "/etc/cmr/config.ini",
+   'no_lock' => 1,
+});
+
+unless ($config->{'basepath'}) { die "No basepath configured"; }
+my $rc = opendir(my $dir, $config->{'basepath'});
+if (!$rc) { die "basepath check failed"; }
+my @contents =  grep (!/^\./o, readdir($dir));
+closedir($dir);
+die "basepath is empty... datapocalypse?" unless @contents;
+
+
+my $completion_thread = threads->create(\&completion_main, {'config' => $config});
+
+my $ev = Cmr::ReactorAsync::init( 
+  $handlers, 
+  $config,
+);
+
+use NanoMsg::Raw;
+use UUID ();
+use JSON::XS ();
+
+my $host = `hostname`;
+chomp($host);
+
+UUID::generate(my $uuid);
+UUID::unparse($uuid, my $uid);
+
+my $wid = "$host-$uid";
+
+my $req_ch = nn_socket(AF_SP, NN_REQ);
+nn_setsockopt($req_ch, NN_REQ, NN_REQ_RESEND_IVL, $config->{'work_resend_interval'}*1000);
+nn_connect($req_ch, "$config->{'server_out'}");
+
+$tasks_pending = 0;
+my $rid = 0;
+$config->{'max_threads'} ||= 4;
+$config->{'tasks_per_thread'} ||= 4;
+my $slots = $config->{'max_threads'}*$config->{'tasks_per_thread'};
+
+while(! Cmr::StartupUtils::finished() ) {
+    if ( Cmr::StartupUtils::load_config (\$config) ) {
+        $config->{'max_threads'} ||= 4;
+        $config->{'tasks_per_thread'} ||= 4;
+        $config->{'dispatch_interval'} ||= 0.01;
+        $slots = $config->{'max_threads'}*$config->{'tasks_per_thread'};
+    }
+
+    if ($tasks_pending < $slots) {
+        # -- Request Work from cmr-server
+        $rid++;
+
+        my $now = Time::HiRes::gettimeofday;
+        my $deadline = $now + $config->{'work_resend_interval'};
+        my $request = JSON::XS->new->encode({
+            "wid"=>"${wid}",
+            "rid"=>${rid},
+            "slots"=>$slots,
+            "deadline"=>$deadline
+        });
+
+        nn_send($req_ch, $request);
+        nn_recv($req_ch, my $client_task);
+
+        # -- Verify Work
+        my ($jid, $type, $uid, $gid, $md5, $json) = split(":", $client_task, 6);
+        Time::HiRes::nanosleep( ($config->{'drought_backoff'} // 0.1) * 1e9) if ($type eq "NO_WORK"); # rest if there's no work
+        next if ($type ne "TASK"); # Don't work on non-work
+        my $task = JSON::XS->new->decode($json);
+        $task->{'uid'} = $uid;
+        $task->{'gid'} = $gid;
+
+        # -- Validate everything
+        my $validate_md5 = md5_hex($json);
+        if ( !defined($md5) or ( $md5 ne $validate_md5 ) ) {
+            $log->debug("Scheduled rejecting a task (md5 mismatch)");
+            $ev->push({'task'=>"REJECT", 'data'=>$task});
+            next;
+        }
+
+        if ($task->{'rid'} != $rid) {
+            $log->debug("Scheduled rejecting a task (worker request id mismatch)"); # This should never happen... if it does, nanomsg might have a bug
+            $ev->push({'task'=>"REJECT", 'data'=>$task});
+            next;
+        }
+
+        # -- Accept
+        # TODO configurable fuzz on accept_deadline
+        my $timed_out = ( $task->{'accept_deadline'} - Time::HiRes::gettimeofday ) - 1.0 ; # if we're within 1 second of missing the accept deadline treat it as if we missed it
+        if ( $timed_out <= 0 ) {
+            $log->debug("Task missed accept deadline $Cmr::Types::Task->{$task->{'type'}} task [$task->{'jid'}:$task->{'id'}]");
+            $ev->push({'task'=>"REJECT", 'data'=>$task});
+            next;
+        }
+
+        $task->{'result'} = &Cmr::Types::CMR_RESULT_ACCEPT;
+        $task->{'started_time'} = Time::HiRes::gettimeofday;
+        $q->enqueue($task);
+
+        { lock $tasks_pending;
+          $tasks_pending++;
+        }
+
+        $log->debug("Scheduled a " . $Cmr::Types::Task->{$task->{'type'}} . " task [$task->{'jid'}:$task->{'id'}]");
+        $ev->push({'task'=>$task->{'type'}, 'data'=>$task});
+
+        $log->debug("Worker Slots Filled - $tasks_pending / $slots");
+    }
+    else {
+        Time::HiRes::nanosleep($config->{'dispatch_interval'}*1e9);
+    }
+}
+
+$completion_thread->join();
+
+sub completion_main {
+    my ($args) = @_;
+    my $config = $args->{'config'};
+
+    use JSON::XS ();
+
+    my $s_caster = nn_socket(AF_SP, NN_PUSH);
+    nn_connect($s_caster, "$config->{'caster_in'}");
+    nn_setsockopt($s_caster, NN_SOL_SOCKET, NN_SNDBUF, 4*1024*1024);
+    $config->{'dispatch_interval'} ||= 0.01;
+
+    while(! Cmr::StartupUtils::finished() ) {
+
+        if ( Cmr::StartupUtils::load_config (\$config) ) {
+            $config->{'dispatch_interval'} ||= 0.01;
+        }
+
+        if ( my $task = $q->dequeue_nb() ) {
+
+            if ( ! ( $task->{'result'} ~~ [&Cmr::Types::CMR_RESULT_ACCEPT, &Cmr::Types::CMR_RESULT_WORKER_REJECT] ) ) {
+              # If Tasks pending was incremented (task must have been accepted) then now is the time to decrement it
+              { lock $tasks_pending;
+                $tasks_pending--;
+                $tasks_pending = $tasks_pending < 0 ? 0 : $tasks_pending;
+              }
+            }
+
+            my $comp = {
+                'type'                  => $task->{'type'},
+                'jid'                   => $task->{'jid'},
+                'wid'                   => $task->{'wid'},
+                'wslot'                 => $task->{'wslot'},
+                'user'                  => $task->{'user'},
+                'id'                    => $task->{'id'},
+                'result'                => $task->{'result'} // &Cmr::Types::CMR_RESULT_UNKNOWN,
+                'warnings'              => $task->{'warnings'} // 0,
+                'retries'               => $task->{'retries'} // 0,
+                'zerobyte'              => $task->{'zerobyte'} // 0,
+                'bucket_destinations'   => $task->{'bucket_destinations'},
+                'elapsed'               => Time::HiRes::tv_interval ( [$task->{'started_time'}], [Time::HiRes::gettimeofday] ),
+                'errors'                => $task->{'errors'} // "",
+            };
+            my $comp_event = JSON::XS->new->encode($comp);
+            nn_send($s_caster, "$task->{'jid'}:$comp_event");
+        }
+        else {
+            Time::HiRes::nanosleep($config->{'dispatch_interval'}*1e9);
+        }
+    }
+}

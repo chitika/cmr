@@ -1,0 +1,74 @@
+#!/usr/bin/perl
+
+#
+#   Copyright (C) 2014 Chitika Inc.
+#
+#   This file is a part of Cmr
+#
+#   Cmr is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation, either version 3 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+use strict;
+use warnings;
+
+use File::Basename qw(dirname);
+use Cwd qw(abs_path);
+use lib  dirname(abs_path(__FILE__))."/../lib";
+use Cmr::Client;
+use Cmr::StartupUtils ();
+
+my ($log, $config) = Cmr::StartupUtils::script_init({
+    'description' => "Cluster map reduce client",
+    'config' => "/etc/cmr/config.ini",
+    'opts'         => [
+        ['verbose|v',           'verbose output'],
+        ['mapper|m=s',          'mapper command to invoke on each file batch'], 
+        ['reducer|r=s',         'reduce command to invoke on each file batch'],
+        ['initial-reducer|i=s', 'reducer to use for first reduce'],
+        ['final-reducer|f=s',   'reducer to use for final reduce'],
+        ['join-reducer|j=s',    'reducer to use for join [requires bucket and aggregate parameters to be specified]'],
+        ['input|i=s@',          'input path (accepts glob pattern)'],
+        ['output|o=s',          'output path'],
+        ['bundle|b=s@',         'bundle file with job'],
+        ['bucket|B',            'split job into buckets to parallelize final reduce [requires aggregates]'],
+        ['aggregates|a=i',      'number of aggregates in mapped data'],
+        ['force|F',             'force run (Will attempt to delete everything in the path specified by output before running)'],
+        ['sort|S',              'sort'],
+    ],
+    'no_lock' => 1,
+});
+
+my $cmr = Cmr::Client::new($config);
+
+$SIG{'INT'} = sub { $cmr->scram(); };
+
+if ( $config->{'bucket'} and $config->{'join_reducer'} ) {
+    $cmr->bucket_join();
+}
+elsif ( $config->{'bucket'} ) {
+    $cmr->bucket_stream();
+}
+else {
+    $cmr->stream();
+}
+
+if ( $cmr->failed() ) {
+    $cmr->scram();
+    exit(1);
+}
+
+if ( $cmr->finish() == &Cmr::Client::FAIL ) {
+    exit(1);
+}
