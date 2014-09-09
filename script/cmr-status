@@ -1,0 +1,54 @@
+#!/usr/bin/perl
+
+#
+#   Copyright (C) 2014 Chitika Inc.
+#
+#   This file is a part of Cmr
+#
+#   Cmr is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation, either version 3 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+use strict;
+use warnings;
+
+use File::Basename qw(dirname);
+use Cwd qw(abs_path);
+use lib  dirname(abs_path(__FILE__))."/../lib";
+use Cmr::Client;
+use Cmr::StartupUtils ();
+
+my ($log, $config) = Cmr::StartupUtils::script_init({
+    'description' => "Cluster map reduce status",
+    'config' => "/etc/cmr/config.ini",
+    'opts'         => [
+        ['verbose|v',     'verbose output'],
+        ['server|s',      'get server status'],
+    ],
+    'no_lock' => 1,
+});
+
+$config->{'no_output_dir'} = 1;
+my $cmr = Cmr::Client::new($config);
+
+$SIG{'INT'} = sub { $cmr->scram(); };
+
+if ($config->{'server'}) {
+    $cmr->server_status();
+} 
+else {
+    $cmr->status();
+}
+$cmr->finish();
+
