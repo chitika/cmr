@@ -12,8 +12,8 @@ make
 make install
 ```
 
-# Usage Examples
-[[Examples]]
+# Examples
+See [Examples](https://github.com/chitika/cmr/wiki/Examples)
 
 # Components
 ```
