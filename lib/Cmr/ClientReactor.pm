@@ -330,7 +330,7 @@ sub push {
 
     if ('input' ~~ $task && $task->{'input'}) {
         if ( $task->{'input'}->[0] =~ /\.gz$/o ) {
-            $task->{'in_fmt_cmd'} = "pigz -dc";
+            $task->{'in_fmt_cmd'} = "gzip -dc";
         }
         for my $i (0..$#{$task->{'input'}}) {
             $task->{'input'}->[$i] =~ s/^$self->{'re_basepath'}//o;
