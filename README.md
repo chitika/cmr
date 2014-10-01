@@ -2,25 +2,40 @@
 CMR is a perl framework built on top of nanomsg for distributing tasks across a clustered environment. Clients for performing parallel distributed grep, map, or map-reduce tasks have been created to show the capabilities of CMR.
 
 # Dependencies
-NanoMsg - http://nanomsg.org/
-The Debian repositories current provide libnanomsg0 and libnanomsg-raw-perl, both required by the cmr-lib Debian package provided. These nanomsg packages are only available in sid but are in the process of being added to testing and backported to Debian Wheezy.
-NanoMsg deb - https://packages.debian.org/libnanomsg0
-Perl NanoMsg bindings deb - https://packages.debian.org/libnanomsg-raw-perl
+* NanoMsg - http://nanomsg.org/
+* gzip - http://www.gzip.org/
 
-Additionally, gzip and pigz are also required and available via apt as are the various perl packages required. Those being; libdata-guid-perl, libdate-calc-perl, libjson-xs-perl, libgetopt-long-descriptive-perl, libdate-manip-perl, libconfig-tiny-perl, liblog-log4perl-per
-l, and libuuid-perl.
+And the following perl libraries
+* NanoMsg::Raw
+* JSON::XS
+* Date::Calc
+* Date::Manip
+* IO::Select
+* POSIX
+* List::Util
+* File::Basename
+* Cwd
+* Data::GUID
+* Getopt::Long
 
-CMR requires a coherent view of a data warehouse from the perspective of all nodes. This mandates the use of a networked or clustered file system such as NFS or Gluster.
+All of these dependencies can be resolved by installing the following debian packages
+* libnanomsg0\*
+* libnanomsg-raw-perl\*
+* libdata-guid-perl
+* libdate-calc-perl
+* libjson-xs-perl
+* libgetopt-long-descriptive-perl
+* libdate-manip-perl
+* libconfig-tiny-perl 
+* liblog-log4perl-perl
+* libuuid-perl
+
+\* The Debian repositories currently provide libnanomsg0 and libnanomsg-raw-perl, both required by the cmr-lib Debian package provided. These nanomsg packages are only available in sid but are in the process of being added to testing and backported to Debian Wheezy. Rather than put your system on unstable the preferred method of acquiring these packages is by backporting them. Instructions on backporting debian packages can be found here - https://wiki.debian.org/SimpleBackportCreation
+
+CMR requires a coherent view of a data warehouse from the perspective of all nodes. CMR mandates the use of a POSIX compliant networked or clustered file system such as NFS or Gluster.
+If being installed on a single sytem, only a POSIX compliant file system is required.
 
 # Installation
-Manual (installs everything):
-
-```
-perl Makefile.PL
-make
-make install
-```
-
 Package based (server components):
 
 ```
@@ -40,6 +55,15 @@ dpkg -i cmr-lib_0.0.1-1_all.deb cmr-client_0.0.1-1_all.deb cmr-utils_0.0.1-1_amd
 ```
 
 All components can be installed on the same system. The default configuration is near complete when all components are installed on the same system.
+
+
+Manual (installs everything):
+
+```
+perl Makefile.PL
+make
+make install
+```
 
 # Tested Installation
 CMR has been developed on and has been tested with Debian Wheezy. All dependencies are available directly from Debian repositories.
