@@ -3,7 +3,7 @@ CMR is a perl framework built on top of nanomsg for distributing tasks across a 
 
 # Dependencies
 NanoMsg - http://nanomsg.org/
-The Debian repositories current provide libnanomsg0 and libnanomsg-raw-perl, both required by the cmr-lib Debian package provided. These nanomsg packages are only available in sid/testing but are in the process of being backported to Debian Wheezy.
+The Debian repositories current provide libnanomsg0 and libnanomsg-raw-perl, both required by the cmr-lib Debian package provided. These nanomsg packages are only available in sid but are in the process of being added to testing and backported to Debian Wheezy.
 NanoMsg deb - https://packages.debian.org/libnanomsg0
 Perl NanoMsg bindings deb - https://packages.debian.org/libnanomsg-raw-perl
 
