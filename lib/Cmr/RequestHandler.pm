@@ -88,20 +88,17 @@ sub handle_request($$$$) {
         for my $file (@{$task->{'input'}}) {
             # Prepend input files with warehouse basepath (stripped by client)
             $input .= sprintf("%s/%s ", $config->{'basepath'}, $file);
-            my @files = split(/\ /, $input);
-            foreach my $file (@files) {
-                last if $task->{'type'} == &Cmr::Types::CMR_CLEANUP;
+            next if $task->{'type'} == &Cmr::Types::CMR_CLEANUP;
 
-                # More Working around some gluster issues (client desync)
-                my $more_retries = 30;
-                while ( $more_retries > 0 && !(-e $file) ) {
-                  $more_retries--;
-                  system("ls -l $file > /dev/null 2>&1");
-                  Time::HiRes::nanosleep(0.1*1e9);
-                }
-
-                $task->{'retries'} = (30 - $more_retries);
+            # More Working around some gluster issues (client desync)
+            my $more_retries = 30;
+            while ( $more_retries > 0 && !(-e "$config->{'basepath'}/$file") ) {
+              $more_retries--;
+              system("ls -l $config->{'basepath'}/$file > /dev/null 2>&1");
+              Time::HiRes::nanosleep(0.1*1e9);
             }
+
+            $task->{'retries'} = (30 - $more_retries);
         }
     }
 
