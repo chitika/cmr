@@ -51,6 +51,9 @@ sub RegexpGlob {
         my ($task) = @_;
         my @paths = ();
 
+        # unmeta dir (opendir doesn't like escape characters)
+        $task->{'lhs'} =~ s/(?<!\\)\\([\|\(\)\[\{\^\$\*\+\?\.])/$1/go;
+
         my $rc = opendir(my $dir, $task->{'lhs'});
         if (!$rc) {
             $return_queue->enqueue(\@paths);
