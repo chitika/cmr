@@ -147,7 +147,13 @@ sub _GLOB_MAIN {
       if (@files) {
         { lock ${$self->{'lock'}};
           for my $file (@files) {
-            my ($ext) = $file =~ /\.([^\.]*)$/o;
+            my $ext = "uncompressed";
+            # TODO: priority on ordering (this might be an argument for a json based configuration)
+            for my $configured_ext (keys %{$self->{'config'}->{'formats'}}) {
+                if ( $file =~  /${configured_ext}$/ ) {
+                    $ext = $configured_ext;
+                }
+            }
             $ext //= "uncompressed";
             unless (exists $self->{'files_by_ext'}->{$glob->[1]}->{$ext}) {
                 my @files = ();
