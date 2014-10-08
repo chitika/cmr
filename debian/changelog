@@ -1,3 +1,9 @@
+cmr (0.0.2-1) unstable; urgency=low
+
+  * Bug fix release
+
+ -- Nickolas Wood <nwood@chitika.com>  Wed, 08 Oct 2014 13:31:55 -0400
+
 cmr (0.0.1-1) unstable; urgency=low
 
   * Initial release
