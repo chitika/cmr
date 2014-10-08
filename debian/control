@@ -27,7 +27,7 @@ Description: Cluster Map Reduce Server
 
 Package: cmr-worker
 Section: chitika
-Depends: ${perl:Depends}, ${shlibs:Depends}, cmr-lib, cmr-utils, pigz, gzip
+Depends: ${perl:Depends}, ${shlibs:Depends}, cmr-lib, cmr-utils, gzip
 Architecture: any
 Description: Cluster Map Reduce Worker
  The cmr-worker package provides a worker that services requests
