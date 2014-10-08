@@ -2,3 +2,5 @@ usr/bin/cmr-worker
 usr/bin/cmr-pipe
 usr/bin/cmr-bucket
 usr/bin/cmr-merge
+usr/bin/cmr-map-json
+usr/bin/cmr-reduce
