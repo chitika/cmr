@@ -199,7 +199,7 @@ sub next {
   my @batch = ();
 
   my $cur_ext;
-  while(1) {
+  MAINLOOP: while(1) {
     for my $ext (keys %{$globber->{'files_by_ext'}->{$self->{'id'}}}) {
       if ( scalar(@{$globber->{'files_by_ext'}->{$self->{'id'}}->{$ext}}) > $batchsize ) {
         { lock ${$globber->{'lock'}};
@@ -208,7 +208,7 @@ sub next {
           }
         }
         $cur_ext = $ext;
-        last;
+        last MAINLOOP;
       }
     }
 
@@ -221,11 +221,11 @@ sub next {
               push( @batch, pop ( @{$globber->{'files_by_ext'}->{$self->{'id'}}->{$ext}} ) );
             }
             $cur_ext = $ext;
-            last;
+            last MAINLOOP;
           }
         }
       }
-      last;
+      last MAINLOOP;
     }
     Time::HiRes::nanosleep(0.01*1e9);
   }
