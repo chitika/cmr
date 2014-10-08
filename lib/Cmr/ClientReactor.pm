@@ -329,12 +329,13 @@ sub push {
     }
 
     if ('input' ~~ $task && $task->{'input'}) {
-        if ( $task->{'input'}->[0] =~ /\.gz$/o ) {
-            $task->{'in_fmt_cmd'} = "pigz -dc";
-        }
         for my $i (0..$#{$task->{'input'}}) {
             $task->{'input'}->[$i] =~ s/^$self->{'re_basepath'}//o;
         }
+    }
+
+    if (defined $task->{'ext'} && $self->{'config'}->{'formats'}->{$task->{'ext'}}) {
+        $task->{'in_fmt_cmd'} = $self->{'config'}->{'formats'}->{$task->{'ext'}};
     }
 
     $task->{'failures'} = 0;

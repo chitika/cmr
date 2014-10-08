@@ -1,19 +1,84 @@
 # CMR
-CMR is a perl framework built on top of nanomsg for distributing tasks across a clustered environment in a scalable manner.
-Clients for performing parallel destributed grep, map, or map-reduce tasks has been created to show the scalability of CMR.
+CMR is a perl framework built on top of nanomsg for distributing tasks across a clustered environment. Clients for performing parallel distributed grep, map, or map-reduce tasks have been created to show the capabilities of CMR.
 
 # Dependencies
-NanoMsg - http://nanomsg.org/
+* NanoMsg - http://nanomsg.org/
+* gzip - http://www.gzip.org/
+
+And the following perl libraries
+* NanoMsg::Raw
+* JSON::XS
+* Date::Calc
+* Date::Manip
+* IO::Select
+* POSIX
+* List::Util
+* File::Basename
+* Cwd
+* Data::GUID
+* Getopt::Long
+
+All of these dependencies can be resolved by installing the following debian packages
+* libnanomsg0\*
+* libnanomsg-raw-perl\*
+* libdata-guid-perl
+* libdate-calc-perl
+* libjson-xs-perl
+* libgetopt-long-descriptive-perl
+* libdate-manip-perl
+* libconfig-tiny-perl 
+* liblog-log4perl-perl
+* libuuid-perl
+
+\* The Debian repositories currently provide libnanomsg0 and libnanomsg-raw-perl, both required by the cmr-lib Debian package provided. These nanomsg packages are only available in sid but are in the process of being added to testing and backported to Debian Wheezy. Rather than put your system on unstable the preferred method of acquiring these packages is by backporting them. Instructions on backporting debian packages can be found here - https://wiki.debian.org/SimpleBackportCreation
+
+CMR requires a coherent view of a data warehouse from the perspective of all nodes. CMR mandates the use of a POSIX compliant networked or clustered file system such as NFS or Gluster.
+If being installed on a single sytem, only a POSIX compliant file system is required.
 
 # Installation
+Package based (server components):
+
+```
+dpkg -i cmr-lib_0.0.1-1_all.deb cmr-server_0.0.1-1_all.deb
+```
+
+Package based (worker components):
+
+```
+dpkg -i cmr-lib_0.0.1-1_all.deb cmr-worker_0.0.1-1_all.deb cmr-utils_0.0.1-1_amd64.deb
+```
+
+Package based (client components):
+
+```
+dpkg -i cmr-lib_0.0.1-1_all.deb cmr-client_0.0.1-1_all.deb cmr-utils_0.0.1-1_amd64.deb
+```
+
+All components can be installed on the same system. The default configuration is near complete when all components are installed on the same system.
+
+
+Manual (installs everything):
+
 ```
 perl Makefile.PL
 make
 make install
 ```
 
-# Usage Examples
-[[Examples]]
+# Tested Installation
+CMR has been developed on and has been tested with Debian Wheezy. All dependencies are available directly from Debian repositories.
+Gluster was chosen as the clustered file system and is the only one verified to work well with CMR, although, NFS should work too.
+Additionally, the network interconnecting all CMR nodes and all Gluster nodes during development of CMR was 40Gb/s Infiniband, known as QDR. As such, some utilities in use by CMR may be out of place on a different file system. Namely, the chunky c binary. It should not ca
+use any issues however.
+
+In order to realize the benefits we have seen, a similar environment is recommended.
+
+# Setup & Configuration
+See [Configuration](https://github.com/chitika/cmr/wiki/Configuration)
+
+# Usage
+See [Examples](https://github.com/chitika/cmr/wiki/Examples)
+
 
 # Components
 ```
@@ -23,47 +88,6 @@ cmr-caster      Broadcasts events produced by cmr-components
 cmr             Map-Reduce client
 cmr-grep        Grep client
 ```
-
-# Configuration
-Cmr is configured through a single ini configuration file.
-
-```
-[global]        configuration options affect all components of cmr and are overriden by configuration options specific to each component
-[cmr-server]    configuration options specific to cmr-server
-[cmr-worker]    configuration options specific to cmr-worker
-[cmr]           configuration options specific to cmr client
-[cmr-grep]      configuration options specific to cmr-grep client
-```
-
-```
-server_in               cmr-server binds to this address, which is used to service cmr client requests
-server_out              cmr-server binds to this address, which is used to communicate with worker instances
-caster_in               cmr-caster binds to this address, which is used to receive requests to broadcast events
-caster_out              cmr-caster binds to this address, which is used to broadcast events
-basepath                path to the root of the clustered file system
-scratch_path            scratch location (must be within the clustered file system)
-output_path             default output location (must be within the clustered file system)
-error_path              error log output location (must be within the clustered file system)
-bundle_path             script bundle location (must be within the clustered file system)
-client_queue_size       client queue's this many tasks locally
-max_task_attempts       maximum allowed attempts on a single task before job failure
-accept_timeout          time allowed for a worker to acknowledge aquiring a client task
-task_timeout            base timeout allowed for a worker to complete a client task
-retry_timeout           additional time allotted to a task for susequent attempts upon task failure
-deadline_scale_factor   increase task timeout by this amount for each task submitted by a job (scale for large jobs)
-max_threads             maximum number of threads to used for parallel crawl of clustered file system
-tasks_per_thread        number of tasks that should be queued on a single thread
-max_thread_backlog      absolute maximum number of tasks allowed to be queued on a single thread
-batch_size              number of files to be included in a single task
-log_level               minimum logging severity, one of TRACE, DEBUG, INFO, WARN, ERROR, FATAL
-drought_backoff         extra sleep time for server/worker when no work is available to be completed
-dispatch_interval       time between client/server/worker dispatch attempts
-delete_zerobyte_output  worker removes files that contain no output after completing tasks
-work_resend_interval    nanomsg resend interval on request channel
-work_request_timeout    nanomsg recieve timeout on server requesting work from a client
-smudge_time             when determining if a job is over utilizing the cluster it must exceed the time used by other jobs by this amount
-```
-
 
 # cmr-server usage
 ```bash
@@ -98,6 +122,7 @@ cmr --input "<glob_pattern>" --mapper <mapper> [--reducer <reducer>] [--config <
 ```
     -v --verbose        verbose mode
     -f --final-reducer  reducer to use for final reduce
+    -c --cache          cache results [don't cleanup job output when writing to stdout]
     -o --output         output to this location rather than the default output path
     -b --bundle         bundle file with job (places it in scratch space along with job data making it accessible to worker nodes)
     -F --force          force run (overwrite output path)
@@ -127,6 +152,7 @@ cmr-grep --input "<glob_pattern>" --pattern "<grep_pattern>" [--config <config f
     -v --verbose        verbose output
     -o --output         output to this location rather than the default output path
     -f --flags          pass grep flags
+    -c --cache          cache results [don't cleanup job output when writing to stdout]
     -F --force          force run (overwrite output path)
     --stdout            output on standard out
 ```

@@ -157,14 +157,15 @@ sub grep {
         $path =~ s/^(?!$args{'basepath'})/$args{'basepath'}\//o;
         my $glob = $self->{'globber'}->PosixGlob($path);
 
-        while ( my @batch = $glob->next($batchsize) ) {
-            map { s/^$args{'basepath'}//o; $_; } @batch;
+        while ( my ($ext, $batch) = $glob->next($batchsize) ) {
+            map { s/^$args{'basepath'}//o; $_; } @$batch;
 
             $self->{'reactor'}->push({
                 'type'          =>  &Cmr::Types::CMR_GREP,
                 'patterns'      =>  $args{'patterns'},
-                'input'         =>  \@batch,
+                'input'         =>  $batch,
                 'destination'   =>  sprintf("%s/%s-%d", $self->{'reactor'}->{'output_path'}, $args{'prefix'}, $part_id),
+                'ext'           =>  $ext,
                 'flags'         =>  $args{'flags'}
             });
 
@@ -422,12 +423,12 @@ sub stream {
 
         $path =~ s/^(?!$args{'basepath'})/$args{'basepath'}\//o;
         my $glob = $self->{'globber'}->PosixGlob($path);
-
-        while ( my @batch = $glob->next($batchsize) ) {
-            map { s/^$args{'basepath'}//o; $_; } @batch;
+        while ( my ($ext, $batch) = $glob->next($batchsize) ) {
+            map { s/^$args{'basepath'}//o; $_; } @$batch;
 
             my $task_args = {
-                'input'         =>  \@batch,
+                'input'         =>  $batch,
+                'ext'           =>  $ext,
                 'destination'   =>  sprintf("%s/%s-%d-%d", $self->{'reactor'}->{'output_path'}, $args{'prefix'}, $part_depth, $part_id),
             };
 
@@ -696,9 +697,8 @@ sub bucket_stream {
         $path =~ s/^(?!$args{'basepath'})/$args{'basepath'}\//o;
         my $glob = $self->{'globber'}->PosixGlob($path);
         
-        while ( my @batch = $glob->next($batchsize) ) {
-        
-            map { s/^$args{'basepath'}//o; $_; } @batch;
+        while ( my ($ext, $batch) = $glob->next($batchsize) ) {
+            map { s/^$args{'basepath'}//o; $_; } @$batch;
 
             my $file = sprintf("%s/this_is_a_bit_of_a_hack", $self->{'reactor'}->{'output_path'});
 
@@ -708,7 +708,8 @@ sub bucket_stream {
                 'buckets'               => $args{'buckets'},
                 'aggregates'            => $args{'aggregates'},
                 'sort'                  => $args{'sort'},
-                'input'                 => \@batch,
+                'input'                 => $batch,
+                'ext'                   => $ext,
                 'map_id'                => $map_id,
                 'destination'           => $file,
             });
@@ -793,9 +794,8 @@ my ($self, %kwargs) = @_;
         my $batchsize = $args{'batch_size'} * $args{'batch_multiplier'};
         $path =~ s/^(?!$args{'basepath'})/$args{'basepath'}\//o;
         my $glob = $self->{'globber'}->PosixGlob($path);
-        while ( my @batch = $glob->next($batchsize) ) {
-
-            map { s/^$args{'basepath'}//o; $_; } @batch;
+        while ( my ($ext, $batch) = $glob->next($batchsize) ) {
+            map { s/^$args{'basepath'}//o; $_; } @$batch;
 
             my $not_a_real_file = sprintf("%s/this_is_a_bit_of_a_hack", $self->{'reactor'}->{'output_path'});
 
@@ -805,7 +805,8 @@ my ($self, %kwargs) = @_;
                 'buckets'       =>  $args{'num_buckets'},
                 'aggregates'    =>  $args{'aggregates'},
                 'join'          =>  1,
-                'input'         =>  \@batch,
+                'input'         =>  $batch,
+                'ext'           =>  $ext,
                 'map_id'        =>  $map_id,
                 'destination'   =>  $not_a_real_file,
                 'prefix'        => 'bucket',

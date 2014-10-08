@@ -60,7 +60,7 @@ sub new {
   my $obj = bless({
       'config' => $config,
       'queue'  => Thread::Queue->new,
-      'files'  => \%files,
+      'files_by_ext'  => \%files,
       'complete' => \%complete,
       'lock'  => \$lock,
       'id'    => 0,
@@ -93,9 +93,10 @@ sub RegexpGlob {
       'id'      => $id,
     });
 
-    my @files : shared = ();
+    my %exts : shared = ();
     my $complete : shared = 0;
-    $self->{'files'}->{$id} = \@files;
+
+    $self->{'files_by_ext'}->{$id} = \%exts;
     $self->{'complete'}->{$id} = \$complete;
 
     $self->{'queue'}->enqueue({&ID=>$id, &TYPE=>&REGEXP_PATTERN, &PATTERN=>$pattern});
@@ -114,9 +115,9 @@ sub PosixGlob {
       'id'      => $id,
     });
 
-    my @files : shared = ();
+    my %exts : shared = ();
     my $complete : shared = 0;
-    $self->{'files'}->{$id} = \@files;
+    $self->{'files_by_ext'}->{$id} = \%exts;
     $self->{'complete'}->{$id} = \$complete;
 
     $self->{'queue'}->enqueue({&ID=>$id, &TYPE=>&POSIX_PATTERN, &PATTERN=>$pattern});
@@ -145,7 +146,22 @@ sub _GLOB_MAIN {
       my @files = $glob->[0]->next();
       if (@files) {
         { lock ${$self->{'lock'}};
-          push @{$self->{'files'}->{$glob->[1]}}, @files;
+          for my $file (@files) {
+            my $ext = "uncompressed";
+            # TODO: priority on ordering (this might be an argument for a json based configuration)
+            for my $configured_ext (keys %{$self->{'config'}->{'formats'}}) {
+                if ( $file =~  /${configured_ext}$/ ) {
+                    $ext = $configured_ext;
+                }
+            }
+            $ext //= "uncompressed";
+            unless (exists $self->{'files_by_ext'}->{$glob->[1]}->{$ext}) {
+                my @files = ();
+                share(@files);
+                $self->{'files_by_ext'}->{$glob->[1]}->{$ext} = \@files;
+            }
+            push @{$self->{'files_by_ext'}->{$glob->[1]}->{$ext}}, $file;
+          }
         }
 
       } else {
@@ -182,25 +198,42 @@ sub next {
   my $globber = $self->{'globber'};
   my @batch = ();
 
-  
+  my $cur_ext;
   while(1) {
-    if ( scalar(@{$globber->{'files'}->{$self->{'id'}}}) > $batchsize ) {
-      { lock ${$globber->{'lock'}};
-        for my $i (0..($batchsize-1)) { push( @batch, pop ( @{$globber->{'files'}->{$self->{'id'}}} ) ); }
+    for my $ext (keys %{$globber->{'files_by_ext'}->{$self->{'id'}}}) {
+      if ( scalar(@{$globber->{'files_by_ext'}->{$self->{'id'}}->{$ext}}) > $batchsize ) {
+        { lock ${$globber->{'lock'}};
+          for my $i (0..($batchsize-1)) {
+            push( @batch, pop ( @{$globber->{'files_by_ext'}->{$self->{'id'}}->{$ext}} ) );
+          }
+        }
+        $cur_ext = $ext;
+        last;
       }
-      last;
     }
 
     if ( ${$globber->{'complete'}->{$self->{'id'}}} ) {
       { lock ${$globber->{'lock'}};
-        my $count = $#{$globber->{'files'}->{$self->{'id'}}};
-        for my $i (0..$count) { push( @batch, pop ( @{$globber->{'files'}->{$self->{'id'}}} ) ); }
+        for my $ext (keys %{$globber->{'files_by_ext'}->{$self->{'id'}}}) {
+          if ( scalar( @{$globber->{'files_by_ext'}->{$self->{'id'}}->{$ext}} ) ) {
+            my $count = $#{$globber->{'files_by_ext'}->{$self->{'id'}}->{$ext}};
+            for my $i (0..$count) {
+              push( @batch, pop ( @{$globber->{'files_by_ext'}->{$self->{'id'}}->{$ext}} ) );
+            }
+            $cur_ext = $ext;
+            last;
+          }
+        }
       }
       last;
     }
     Time::HiRes::nanosleep(0.01*1e9);
   }
-  return @batch;
+
+  if (scalar(@batch)) {
+    return $cur_ext, \@batch;
+  }
+  return;
 }
 
 1;
