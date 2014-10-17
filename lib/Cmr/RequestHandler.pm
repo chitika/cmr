@@ -53,6 +53,8 @@ sub handle_request($$$$) {
     my $log = Cmr::StartupUtils::get_logger();
 
     my $task = $request->{'data'};
+    $task->{'started_time'} = Time::HiRes::gettimeofday;
+
     $task->{'wslot'} = $reactor->{'id'};
 
     $task->{'result'} = &Cmr::Types::CMR_RESULT_FAILURE;

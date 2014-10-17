@@ -63,6 +63,7 @@ my $handlers = {
   &Cmr::Types::CMR_CLEANUP_TEMPORARY => sub {
     my ($event, $config, $self) = @_;
     my $task = $event->{'data'};
+    $task->{'started_time'} = Time::HiRes::gettimeofday;
 
     $task->{'result'} = &Cmr::Types::CMR_RESULT_FAILURE;
     $task->{'zerobyte'} = 1;
@@ -199,7 +200,6 @@ while(! Cmr::StartupUtils::finished() ) {
         }
 
         $task->{'result'} = &Cmr::Types::CMR_RESULT_ACCEPT;
-        $task->{'started_time'} = Time::HiRes::gettimeofday;
         $q->enqueue($task);
 
         { lock $tasks_pending;

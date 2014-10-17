@@ -73,7 +73,11 @@ sub new {
     $log = Cmr::StartupUtils::get_logger();
 
     my ($user, undef, undef, undef, undef, undef, undef, undef, undef) = getpwuid($<);
-    if (!$user) { die "failed to get user - LDAP lookup failed? *shrug*"; }
+    unless (!$user) {
+        print STDERR "Error: Failed to determine running user\n";
+        exit(1);
+    }
+
     $config->{'USER'} = $user;
 
     my $pid = $$;
@@ -83,19 +87,41 @@ sub new {
     UUID::unparse($uuid, my $jid);
     $config->{'JOB_ID'} = $jid;
 
-    unless ($config->{'basepath'}) { die "No basepath configured"; }
+    unless ($config->{'basepath'}) {
+        print STDERR "Error: No basepath configured.\n";
+        print STDERR "Please provide a value for basepath in the CMR configuration - /etc/cmr/config.ini\n";
+        print STDERR "The basepath should point to the root of your data warehouse.\n";
+        exit(1);
+    }
+
     my $rc = opendir(my $dir, $config->{'basepath'});
-    if (!$rc) { die "basepath check failed"; }
+    if (!$rc) {
+        print STDERR "Error: Failed to access basepath  $config->{'basepath'}";
+        exit(1);
+    }
+
     my @contents =  grep (!/^\./o, readdir($dir));
     closedir($dir);
-    die "basepath is empty... datapocalypse?" unless @contents;
+
+    unless (@contents) {
+        print STDERR "Error: Basepath $config->{'basepath'} is empty.\n";
+        print STDERR "Data warehouse is missing?\n";
+        exit(1);
+    }
 
     my $basepath      = $config->{'basepath'};
     my $re_basepath   = qr/$basepath/;
     my $destination   = $config->{'output'};
 
     for my $path ( ('scratch_path','output_path','error_path','bundle_path') ) {
-        unless ($config->{$path}) { die "No $path configured"; }
+        unless ($config->{$path}) {
+            print STDERR "Error: No ${path} configured.";
+            print STDERR "Please provide a value for ${path} in the CMR configuration - /etc/cmr/config.ini\n";
+            exit(1);
+        }
+
+        # TODO: Make replacement of variables in paths more robust, there are a number of edge cases
+        # that this implementation won't handle cleanly
         my @replace_fields = $config->{$path} =~ /\$\{([^\}]*)\}/g;
         for my $field (@replace_fields) {
             if ( exists $config->{$field} ) {
@@ -119,7 +145,7 @@ sub new {
                 sleep(1);
             }
             elsif ( -e $config->{'final_destination'} ) {
-                print STDERR "output path $config->{'final_destination'} already exists\n";
+                print STDERR "Error: Output location $config->{'final_destination'} already exists.\n";
                 exit(1);
             }
         }
@@ -138,7 +164,7 @@ sub new {
                 sleep(1);
             }
             elsif ( -e $config->{'output_path'} ) {
-                print STDERR "output path $config->{'output_path'} already exists\n";
+                print STDERR "Error: Output location $config->{'output_path'} already exists.\n";
                 exit(1);
             }
         }
@@ -155,7 +181,7 @@ sub new {
 
         for my $file (@{$config->{'bundle'}}) {
             unless (-e $file) {
-                print STDERR "Failed to locate bundled file: ${file}\n";
+                print STDERR "Error: Failed to locate bundled file ${file}\n";
                 exit(1);
             }
 
@@ -168,7 +194,7 @@ sub new {
     }
 
 
-    print STDERR "Job id is $jid\n" if $config->{'verbose'};
+    print STDERR "Your JOB_ID is $jid\n" if $config->{'verbose'};
 
     $config->{'max_task_errors'} //= 16;
 
@@ -219,7 +245,7 @@ sub sync {
     my ($self) = @_;
     if ($self->{'finished'} or $self->{'failed'}) {
         my $log = Cmr::StartupUtils::get_logger();
-        $log->debug("failed sync - cmr instance is finished");
+        $log->debug("Failed sync - cmr instance is finished");
         return;
     }
 

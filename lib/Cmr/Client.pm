@@ -185,10 +185,13 @@ sub grep {
 
 
     print STDERR "merging output files\n" if $args{'verbose'};
-
-    $self->hierarchical_merge("input"=>\@output);
-    return $self->fail() if $self->{'reactor'}->failed();
-
+    if ( $args{'do_hierarchical_merge'} ) {
+        $self->hierarchical_merge("input"=>\@output);
+        return $self->fail() if $self->{'reactor'}->failed();
+    } else {
+        $self->sequential_merge("input"=>\@output);
+        # reactor isn't used for simple merge
+    }
 
     print STDERR "Grep Finished\n" if $args{'verbose'};
     return &SUCCESS;
@@ -293,6 +296,33 @@ sub hierarchical_reduce {
 
 
     return $self->fail() if $self->{'reactor'}->failed();
+    return &SUCCESS;
+}
+
+
+sub sequential_merge {
+    my ($self, %kwargs) = @_;
+
+    my %defaults = (
+        'prefix'            => 'merge',
+        'outfile'           => 'output',
+    );
+
+    # merge defaults, configuartion and passed args
+    my %args = ( %defaults, %{$self->{'config'}}, %kwargs );
+    my @input        = @{$args{'input'}};
+
+    print STDERR "Performing Sequential Merge\n";
+    sysopen(OUT, sprintf("%s/%s", $self->{'reactor'}->{'output_path'}, $args{'outfile'}), O_WRONLY|O_CREAT|O_BINARY);
+    for my $file (@input) {
+        sysopen(IN, $file, O_RDONLY|O_BINARY );
+        my $size = -s IN;
+        sysread(IN, my $buf, $size);
+        syswrite(OUT, $buf, $size);
+        close(IN);
+    }
+
+    print STDERR "Finished Merge\n";
     return &SUCCESS;
 }
 
@@ -464,6 +494,7 @@ sub merge_buckets {
         'prefix'            => 'merge_bucket',
         'merge_batch_size'  => 25,
         'in_order'          => 0,
+        'delimiter'         => "",
         'outfile'           => 'output',
     );
 
@@ -507,6 +538,7 @@ sub merge_buckets {
                     'input'         =>  \@task_files,
                     'destination'   =>  $file,
                     'in_order'      =>  $args{'in_order'},
+                    'delimiter'     =>  $args{'delimiter'},
                 });
 
                 # Keep a mapping files -> buckets
@@ -678,7 +710,7 @@ sub bucket_stream {
         'batch_size'        => 16,
         'batch_multiplier'  => 1,
         'buckets'           => 16,
-        'sort'              => 0,
+        'delimiter'         => "",
     );
 
     # merge defaults, configuartion and passed args
@@ -706,8 +738,7 @@ sub bucket_stream {
                 'type'                  => &Cmr::Types::CMR_BUCKET,
                 'mapper'                => $args{'mapper'},
                 'buckets'               => $args{'buckets'},
-                'aggregates'            => $args{'aggregates'},
-                'sort'                  => $args{'sort'},
+                'delimiter'             => $args{'delimiter'},
                 'input'                 => $batch,
                 'ext'                   => $ext,
                 'map_id'                => $map_id,
@@ -724,33 +755,12 @@ sub bucket_stream {
     $self->{'reactor'}->clear_job_output();
 
 
-    if ($args{'sort'}) {
-        # -- Merge files ( in order merge )
-        my $merged_buckets  = $self->merge_buckets('input'=>\@outputs, 'in_order'=>1);
-        return $self->fail() if $self->{'reactor'}->failed();
+    # -- Merge files ( in order merge )
+    my $merged_buckets  = $self->merge_buckets('input'=>\@outputs, 'in_order'=>1);
+    return $self->fail() if $self->{'reactor'}->failed();
 
-        if ($args{'reducer'}) {
-            my $reduced_buckets = $self->reduce_buckets('input'=>$merged_buckets, 'reducer'=>$args{'reducer'}, 'final_reduce'=>1);
-            return $self->fail() if $self->{'reactor'}->failed();
-
-            my @reduced_files;
-            for my $bucket (@$reduced_buckets) {
-                for my $file (@$bucket) {
-                    push @reduced_files, $file;
-                }
-            }
-
-            $self->hierarchical_merge("input"=>\@reduced_files, "prefix"=>"final_merge");
-            return $self->fail() if $self->{'reactor'}->failed();
-        }
-
-    } elsif ($args{'reducer'}) {
-        # -- Reduce files : 
-        # For each key range 
-        #    take the part files for that range and perform a hierarchical-reduce
-        # The resultant file is fully reduced ( the entire key-range was passed through one reducer )
-
-        my $reduced_buckets = $self->reduce_buckets('input'=>\@outputs, 'reducer'=>$args{'reducer'}, 'final_reduce'=>1);
+    if ($args{'reducer'}) {
+        my $reduced_buckets = $self->reduce_buckets('input'=>$merged_buckets, 'reducer'=>$args{'reducer'}, 'final_reduce'=>1);
         return $self->fail() if $self->{'reactor'}->failed();
 
         my @reduced_files;
@@ -760,9 +770,15 @@ sub bucket_stream {
             }
         }
 
-        # -- Merge files
-        # Hierarchically merge the fully reduced output files to generate the output file
-        $self->hierarchical_merge("input"=>\@reduced_files, "prefix"=>"final_merge");
+        print STDERR "merging output files\n" if $args{'verbose'};
+        if ( $args{'do_hierarchical_merge'} ) {
+            $self->hierarchical_merge("input"=>\@reduced_files);
+            return $self->fail() if $self->{'reactor'}->failed();
+        } else {
+            $self->sequential_merge("input"=>\@reduced_files);
+            # reactor isn't used for simple merge
+        }
+
         return $self->fail() if $self->{'reactor'}->failed();
     }
 
@@ -777,6 +793,7 @@ my ($self, %kwargs) = @_;
         'num_buckets'       => 8,
         'batch_size'        => 16,
         'batch_multiplier'  => 1,
+        'delimiter'         => '',
         'outfile'           => 'output',
     );
 
@@ -803,7 +820,7 @@ my ($self, %kwargs) = @_;
                 'type'          =>  &Cmr::Types::CMR_BUCKET,
                 'mapper'        =>  $args{'mapper'},
                 'buckets'       =>  $args{'num_buckets'},
-                'aggregates'    =>  $args{'aggregates'},
+                'delimiter'     =>  $args{'delimiter'},
                 'join'          =>  1,
                 'input'         =>  $batch,
                 'ext'           =>  $ext,
@@ -821,12 +838,14 @@ my ($self, %kwargs) = @_;
     my @outputs = $self->{'reactor'}->get_job_output();
     $self->{'reactor'}->clear_job_output();
 
-    # -- Reduce files :
-    # For each key range
-    #    take the part files for that range and perform a hierarchical-reduce
-    # The resultant file is fully reduced on the join key ( the each key-range was passed through one reducer )
 
-    my $reduced_buckets = $self->reduce_buckets('input'=>\@outputs, 'reducer'=>$args{'join_reducer'}, 'prefix'=>'join_reduce', 'join'=>1);
+    # -- Merge files ( in order merge )
+    my $merged_buckets  = $self->merge_buckets('input'=>\@outputs, 'in_order'=>1);
+    return $self->fail() if $self->{'reactor'}->failed();
+
+    # -- Reduce files :
+    # For each secondary key range invoke the join-reducer
+    my $reduced_buckets = $self->reduce_buckets('input'=>$merged_buckets, 'reducer'=>$args{'join_reducer'}, 'prefix'=>'join_reduce', 'join'=>1);
     return $self->fail() if $self->{'reactor'}->failed();
 
     my @reduced_files;
@@ -837,9 +856,7 @@ my ($self, %kwargs) = @_;
     }
 
     # We're not done yet, time to go through the entire process again...
-    # -- Rebucket files
-    # Now that the join key has been striped from the files we can rebucket according to their key fields
-    # Pass each reduced file through the bucketizer
+    # -- Rebucket files ( this time on primary key )
     $map_id = 0;
     for my $file (@reduced_files) {
         $file =~ s/^$args{'basepath'}//o;
@@ -848,10 +865,10 @@ my ($self, %kwargs) = @_;
         $self->{'reactor'}->push({
             'type'          =>  &Cmr::Types::CMR_BUCKET,
             'buckets'       =>  $args{'num_buckets'},
-            'aggregates'    =>  $args{'aggregates'},
             'join'          =>  $args{'join'},
-            'input'         =>  [$file],
             'strip_joinkey' =>  1,
+            'delimiter'     =>  $args{'delimiter'},
+            'input'         =>  [$file],
             'map_id'        =>  $map_id,
             'destination'   =>  $not_a_real_file,
             'prefix'        => 'rebucket',
@@ -865,26 +882,31 @@ my ($self, %kwargs) = @_;
     @outputs = $self->{'reactor'}->get_job_output();
     $self->{'reactor'}->clear_job_output();
 
-    $self->cleanup('input'=>\@reduced_files);
-    @reduced_files = ();
-    $self->{'reactor'}->sync();
-    $self->{'reactor'}->clear_job_output();
+    # -- Merge files ( in order merge )
+    $merged_buckets  = $self->merge_buckets('input'=>\@outputs, 'in_order'=>1);
+    return $self->fail() if $self->{'reactor'}->failed();
 
-    # -- Reduce ... again!
-    # For each key range
-    #    take the part files for that range and perform a hierarchical-reduce
-    # The resultant file is fully reduced on the key fields ( the entire key-range was passed through one reducer )
-    $reduced_buckets = $self->reduce_buckets('input'=>\@outputs, 'reducer'=>$args{'reducer'}, 'prefix'=>'final_reduce', 'final_reduce'=>1);
+    # -- Reduce files :
+    # For each secondary key range invoke the join-reducer
+    $reduced_buckets = $self->reduce_buckets('input'=>$merged_buckets, 'reducer'=>$args{'reducer'}, 'prefix'=>'final_reduce', 'final_reduce'=>1);
+    return $self->fail() if $self->{'reactor'}->failed();
+
     @reduced_files = ();
     for my $bucket (@$reduced_buckets) {
         for my $file (@$bucket) {
             push @reduced_files, $file;
         }
     }
-    
-    # -- Merge files
-    # Hierarchically merge the fully reduced output files to generate the output file
-    $self->hierarchical_merge("input"=>\@reduced_files, "prefix"=>"final_merge");
+
+    # -- Merge the partitions
+    print STDERR "merging output files\n" if $args{'verbose'};
+    if ( $args{'do_hierarchical_merge'} ) {
+        $self->hierarchical_merge("input"=>\@reduced_files);
+        return $self->fail() if $self->{'reactor'}->failed();
+    } else {
+        $self->sequential_merge("input"=>\@reduced_files);
+        # reactor isn't used for simple merge
+    }
 
     return $self->fail() if $self->{'reactor'}->failed();
     return &SUCCESS;

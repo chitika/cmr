@@ -22,9 +22,16 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <glob.h>
+#include <getopt.h>
+
+static struct option long_options[] = {
+    {.name = "delimiter",     .has_arg = required_argument, .flag = 0, .val = 'x'},
+    {0,0,0,0},
+};
+static char short_options[] = "x:";
 
 void usage() {
-    fprintf(stderr, "Usage: cmr-mergebucket <glob> [<glob ...]\n");
+    fprintf(stderr, "Usage: cmr-mergebucket [-x <delimiter] <glob> [<glob ...]\n");
 }
 
 #define BUFFER_SIZE 1024*64
@@ -48,6 +55,7 @@ int null_stat (const char *path, struct stat *buf) {
 int main( int argc, char* const argv[] ) {
     int option_index = 0;
     glob_t file_glob;
+    char delimiter = '\002';
 
     file_glob.gl_stat = null_stat;
     file_glob.gl_lstat = null_stat;
@@ -60,16 +68,28 @@ int main( int argc, char* const argv[] ) {
     int open_files = 0;
     size_t buffer_size = BUFFER_SIZE;
     char* pos;
-    int argi;
+    int argi = 1;
 
-    if (argc <= 1) {
+    while (1) {
+        int opt = getopt_long(argc, argv, short_options, long_options, &option_index);
+        if (opt < 0) { break; }
+        switch (opt) {
+            case 'x': // buffer-size
+                argi += 2;
+                delimiter = optarg[0];
+                buffer_size = atoi(optarg);
+                break;
+        }
+    }
+
+    if (argc <= argi) {
         usage();
         exit(1);
     }
 
-    glob(argv[1], GLOB_ALTDIRFUNC|GLOB_BRACE, NULL, &file_glob);
+    glob(argv[argi++], GLOB_ALTDIRFUNC|GLOB_BRACE, NULL, &file_glob);
 
-    for ( int i=2; i<argc; i++ ) {
+    for ( int i=argi; i<argc; i++ ) {
         glob(argv[i], GLOB_ALTDIRFUNC|GLOB_BRACE|GLOB_APPEND, NULL, &file_glob);
     }
 
@@ -102,9 +122,9 @@ int main( int argc, char* const argv[] ) {
             open_files--;
             continue;
         }
-        // Figure out how long the secondary key is
+        // Figure out how long the key is
         pos = mergy[i].buf;
-        while(pos[0] != '\001') { pos++; }
+        while (pos[0] != delimiter) { pos++; }
         mergy[i].skey_len = pos - mergy[i].buf;
     }
     
@@ -149,12 +169,11 @@ int main( int argc, char* const argv[] ) {
                     open_files--;
                     break;
                 }
-                // Figure out how long the secondary key is
+                // Figure out how long the key is
                 pos = mergy[i].buf;
-                while(pos[0] != '\001') { pos++; }
+                while (pos[0] != delimiter) { pos++; }
                 mergy[i].skey_len = pos - mergy[i].buf;
             }
         }
     }
-
 }
