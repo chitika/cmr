@@ -73,7 +73,7 @@ sub new {
     $log = Cmr::StartupUtils::get_logger();
 
     my ($user, undef, undef, undef, undef, undef, undef, undef, undef) = getpwuid($<);
-    unless (!$user) {
+    unless ($user) {
         print STDERR "Error: Failed to determine running user\n";
         exit(1);
     }
