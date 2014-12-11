@@ -134,9 +134,12 @@ UUID::unparse($uuid, my $uid);
 
 my $wid = "$host-$uid";
 
-my $req_ch = nn_socket(AF_SP, NN_REQ);
-nn_setsockopt($req_ch, NN_REQ, NN_REQ_RESEND_IVL, $config->{'work_resend_interval'}*1000);
-nn_connect($req_ch, "$config->{'server_out'}");
+my $from_server = nn_socket(AF_SP, NN_PULL);
+nn_connect($from_server, "$config->{'worker_in'}");
+nn_setsockopt($from_server, NN_SOL_SOCKET, NN_RCVTIMEO, 1000);
+
+my $to_server = nn_socket(AF_SP, NN_PUSH);
+nn_connect($to_server, "$config->{'server_in'}");
 
 $tasks_pending = 0;
 my $rid = 0;
@@ -165,8 +168,13 @@ while(! Cmr::StartupUtils::finished() ) {
             "deadline"=>$deadline
         });
 
-        nn_send($req_ch, $request);
-        nn_recv($req_ch, my $client_task);
+        
+        nn_send($to_server, $request);
+$log->debug("sent $request");
+        nn_recv($from_server, my $client_task, 262143);
+        next unless $client_task;
+$log->debug("received $client_task");
+
 
         # -- Verify Work
         my ($jid, $type, $uid, $gid, $md5, $json) = split(":", $client_task, 6);
@@ -177,6 +185,7 @@ while(! Cmr::StartupUtils::finished() ) {
         $task->{'gid'} = $gid;
 
         # -- Validate everything
+=cut
         my $validate_md5 = md5_hex($json);
         if ( !defined($md5) or ( $md5 ne $validate_md5 ) ) {
             $log->debug("Scheduled rejecting a task (md5 mismatch)");
@@ -189,6 +198,7 @@ while(! Cmr::StartupUtils::finished() ) {
             $ev->push({'task'=>"REJECT", 'data'=>$task});
             next;
         }
+=cut
 
         # -- Accept
         # TODO configurable fuzz on accept_deadline

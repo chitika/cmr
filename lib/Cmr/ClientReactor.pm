@@ -388,9 +388,12 @@ sub thread_main {
     my $user = $self->{'user'};
     my $task_id = 0;
 
-    my $s_server = nn_socket(AF_SP, NN_REP);
-    nn_connect($s_server, $config->{'server_in'});
-    nn_setsockopt($s_server, NN_SOL_SOCKET, NN_RCVTIMEO, 0);
+    my $from_server = nn_socket(AF_SP, NN_PULL);
+    nn_connect($from_server, $config->{'client_in'});
+    nn_setsockopt($from_server, NN_SOL_SOCKET, NN_RCVTIMEO, 0);
+
+    my $to_server = nn_socket(AF_SP, NN_PUSH);
+    nn_connect($to_server, $config->{'server_in'});
 
     my $s_caster_in = nn_socket(AF_SP, NN_PUSH);
     nn_connect($s_caster_in, $config->{'caster_in'});
@@ -428,9 +431,9 @@ sub thread_main {
     my $now = Time::HiRes::gettimeofday;
     my $last_resubmit = $now;
 
-    my $bytes_recv = nn_recv($s_server, my $worker_req, 262143);
+    my $bytes_recv = nn_recv($from_server, my $worker_req, 262143);
     my $md5 = md5_hex("{}");
-    nn_send($s_server, "${jid}:NO_WORK:${md5}:{}");
+    nn_send($to_server, "${jid}:NO_WORK:${md5}:{}");
 
     my $active = 1;
 
@@ -482,7 +485,7 @@ sub thread_main {
 
         ## Check for any work requests
 
-        my $bytes_recv = nn_recv($s_server, my $worker_req, 262143);
+        my $bytes_recv = nn_recv($from_server, my $worker_req, 262143);
         if ($bytes_recv && $worker_req) {
 
             ## Send a task from the client backlog to the worker
@@ -521,16 +524,16 @@ sub thread_main {
                     $self->{'num_tasks_submitted'}++;
 
                     my $md5 = md5_hex($json);
-                    nn_send($s_server, "${jid}:TASK:${md5}:${json}");
+                    nn_send($to_server, "${jid}:TASK:${md5}:${json}");
 
                     print STDERR "", $self->{'num_tasks_completed'}, "/", $self->{'num_tasks_submitted'} if $config->{'verbose'};
                     $task_id++;
                 }
-                else {
-                    $worker_req = undef;
-                    my $md5 = md5_hex("{}");
-                    nn_send($s_server, "${jid}:NO_WORK:${md5}:{}");
-                }
+#                else {
+#                    $worker_req = undef;
+#                    my $md5 = md5_hex("{}");
+#                    nn_send($to_server, "${jid}:NO_WORK:${md5}:{}");
+#                }
             } # unlock
             $active = 1;
         }
@@ -594,7 +597,8 @@ sub thread_main {
     nn_send($s_caster_in, "${jid}:${disconnect_json}");
     $self->{'num_tasks_submitted'}++;
 
-    nn_close($s_server);
+    nn_close($to_server);
+    nn_close($from_server);
     nn_close($s_caster_in);
     nn_close($s_caster_out);
 }
