@@ -51,7 +51,7 @@ void usage() {
 int main( int argc, char* const argv[] ) {
     const char* prefix = "part";
     const char* destination = ".";
-    char delimiter = '\002';
+    char delimiter = '\001';
 
     int option_index = 0;
     int num_partitions = -1;

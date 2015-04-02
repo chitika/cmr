@@ -27,18 +27,16 @@ use strict;
 use warnings;
 
 sub handle_request_local {
-    my ($self, $task, $config, $input, $output) = @_;
-    return &Cmr::Types::CMR_RESULT_SUCCESS unless ${input};
+    my ($self, $task, $config) = @_;
+    return &Cmr::Types::CMR_RESULT_SUCCESS unless $task->{'input'};
 
     # Assume  failure
     my $result = &Cmr::Types::CMR_RESULT_FAILURE;
 
     # Build command pipeline
     my @cmds;
-    push @cmds, "chunky -s 16 ${input}";
-    if ( $task->{'in_fmt_cmd'} ) { 
-        push @cmds, "$task->{'in_fmt_cmd'} ";
-    }
+    push @cmds, "curl -s -H 'Accept-Encoding: gzip' " . join(' ', @{$task->{'input'}});
+    push @cmds, "gzip -dc";
 
     if ($task->{'mapper'}) {
         push @cmds, "$task->{'mapper'} --CMR_NAME mapper";
@@ -48,11 +46,20 @@ sub handle_request_local {
         push @cmds, "$task->{'reducer'} --CMR_NAME reducer";
     }
 
-    push @cmds, "chunky -s 16";
+    push @cmds, "gzip -c";
+
+    if (exists $task->{'persist'}) {
+        # This output is being persisted as user data
+        push @cmds, "seaweed_set -d 2 -p user -k $task->{'user'}/$task->{'persist'}/$task->{'output'}";
+    }
+    else {
+        # This output is temporary job data
+        push @cmds, "seaweed_set -d 1 -p job -k $task->{'jid'}/$task->{'output'}";
+    }
 
     my $timeout = $task->{'deadline'} - Time::HiRes::gettimeofday;
     if ($timeout < 0) { return $result; }
-    my $cmd = "timeout -s KILL ${timeout} cmr-pipe --CMR_PIPE_UID $task->{'uid'} --CMR_PIPE_GID $task->{'gid'} " . join(' : ', @cmds) . " --CMR_PIPE_OUT ${output}";
+    my $cmd = "timeout -s KILL ${timeout} cmr-pipe --CMR_PIPE_UID $task->{'uid'} --CMR_PIPE_GID $task->{'gid'} " . join(' : ', @cmds);
     my $rc = &Cmr::RequestHandler::task_exec($task, $cmd);
 
     # Check for success

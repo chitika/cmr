@@ -27,8 +27,8 @@ use strict;
 use warnings;
 
 sub handle_request_local {
-    my ($self, $task, $config, $input, $output) = @_;
-    return &Cmr::Types::CMR_RESULT_SUCCESS unless ${input};
+    my ($self, $task, $config) = @_;
+    return &Cmr::Types::CMR_RESULT_SUCCESS unless $task->{'input'};
 
     # Assume failure
     my $result = &Cmr::Types::CMR_RESULT_FAILURE;
@@ -44,19 +44,22 @@ sub handle_request_local {
     # Build up command line
     my @cmds;
 
-    # Here chunky is added to the command pipeline to force large read/writes [16mb]
-    push @cmds, "chunky -s 16 ${input}";
+    push @cmds, "curl -s -H 'Accept-Encoding: gzip' " . join(' ', @{$task->{'input'}});
+    push @cmds, "gzip -dc";
+#    push @cmds, "seaweed_get " . join(' ', @{$task->{'input'}});
+#    push @cmds, "curl -N -s " . join(' ', @{$task->{'input'}});
 
-    if ( $task->{'in_fmt_cmd'} ) {
-        push @cmds, "$task->{'in_fmt_cmd'}";
-    }
+#    if ( $task->{'in_fmt_cmd'} ) {
+#        push @cmds, "$task->{'in_fmt_cmd'}";
+#    }
 
     push @cmds, "$grep";
-    push @cmds, "chunky -s 16";
+    push @cmds, "gzip -c";
+    push @cmds, "seaweed_set -k $task->{'jid'}/$task->{'output'} -d 1";
 
     my $timeout = $task->{'deadline'} - Time::HiRes::gettimeofday;
     if ($timeout < 0) { return $result; }
-    my $cmd = "timeout -s KILL ${timeout} cmr-pipe --CMR_PIPE_UID $task->{'uid'} --CMR_PIPE_GID $task->{'gid'} " . join(' : ', @cmds) . " --CMR_PIPE_OUT ${output}";
+    my $cmd = "timeout -s KILL ${timeout} cmr-pipe --CMR_PIPE_UID $task->{'uid'} --CMR_PIPE_GID $task->{'gid'} " . join(' : ', @cmds);
     my $rc = &Cmr::RequestHandler::task_exec($task, $cmd);
 
     # Check for success

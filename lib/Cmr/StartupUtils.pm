@@ -36,7 +36,8 @@ use Fcntl (':flock');
 
 use File::Basename qw(dirname);
 use Cwd qw(abs_path);
-use lib dirname (abs_path(__FILE__))."/StartupUtils";
+use lib dirname (abs_path(__FILE__))."/..";
+
 
 use Cmr::StartupUtils::StartupLogTrap ();
 
@@ -89,8 +90,9 @@ sub error_caller {
 
 
 sub load_config {
-    _REQUIRE_INIT;
     my ($config_ref) = @_;
+    $current_config //= $$config_ref;
+    _REQUIRE_INIT;
     my $config = $$config_ref;
 
     # Don't attempt to load the configuration too freqently (we have to stat it each time we check...)
@@ -347,7 +349,6 @@ sub script_init {
     push @opts, ['log-level=s',         'log level [TRACE, DEBUG, INFO, WARN, ERROR, FATAL]'];
     push @opts, ['log=s',               'script logging location'];
     push @opts, ['stdout',              'suggests script output on stdout'];
-    push @opts, ['debug|d',             'run in debug mode'];
     push @opts, ['help|h',              'Print usage information'];
 
     # Merge provided options with default options

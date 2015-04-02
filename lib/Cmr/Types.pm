@@ -40,6 +40,7 @@ use constant {
     CMR_BROADCAST           => 13,
     CMR_BUCKET              => 14,
     CMR_CLEANUP_TEMPORARY   => 15,
+    CMR_POLYMER             => 16,
 };
 
 our $Watcher = {
@@ -58,6 +59,7 @@ our $Watcher = {
     &CMR_SERVER_STATUS      => "server_status",
     &CMR_BROADCAST          => "broadcast",
     &CMR_BUCKET             => "bucket",
+    &CMR_POLYMER            => "polymer",
     &CMR_CLEANUP_TEMPORARY  => "cleanup_temporary",
 };
 
@@ -77,6 +79,7 @@ our $Task = {
     &CMR_SERVER_STATUS      => "Server Status",
     &CMR_BROADCAST          => "Broadcast",
     &CMR_BUCKET             => "Bucket",
+    &CMR_POLYMER            => "Polymer",
     &CMR_CLEANUP_TEMPORARY  => "Cleanup Temporary",
 };
 

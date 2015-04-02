@@ -28,11 +28,13 @@ sub Version { return $VERSION }
 
 use File::Basename qw(dirname);
 use Cwd qw(abs_path);
-use lib dirname (abs_path(__FILE__));
+use lib dirname (abs_path(__FILE__))."/..";
 
 use Cmr::ClientReactor();
-use Cmr::GlusterGlobAsync ();
+use Cmr::SeaweedGlob ();
 use Cmr::GlusterUtils ();
+use Cmr::Seaweed ();
+
 use Date::Manip ();
 
 use Fcntl qw/O_RDONLY O_WRONLY O_CREAT O_BINARY/;
@@ -46,10 +48,18 @@ use constant {
 sub new {
     my ($config) = @_;
 
+    my ($user, undef, undef, undef, undef, undef, undef, undef, undef) = getpwuid($<);
+
     my $obj = {
         'config'  => $config,
         'reactor' => &Cmr::ClientReactor::new($config),
-        'globber' => &Cmr::GlusterGlobAsync::new($config),
+        'globbers' => {
+            'warehouse' => &Cmr::SeaweedGlob::new($config, 0, "warehouse"),
+            'user'      => &Cmr::SeaweedGlob::new($config, 2, "user/${user}"),
+        },
+        'warehouse_index' => &Cmr::Seaweed::new(redis_addr=>$config->{redis_addr}, seaweed_addr=>$config->{seaweed_addr}),
+        'job_index'       => &Cmr::Seaweed::new(redis_addr=>$config->{redis_addr}, seaweed_addr=>$config->{seaweed_addr}, db=>1, prefix=>"job"),
+        'user_index'      => &Cmr::Seaweed::new(redis_addr=>$config->{redis_addr}, seaweed_addr=>$config->{seaweed_addr}, db=>2, prefix=>"user/${user}"),
         'scram'   => 0,
         'finish'  => 0,
         'failed'  => 0,
@@ -82,7 +92,9 @@ sub scram {
 
     $self->{'scram'} = 1;
     $self->{'reactor'}->scram();
-    $self->{'globber'}->scram();
+    for my $key (keys %{$self->{'globbers'}}) {
+        $self->{'globbers'}->{$key}->scram();
+    }
 
     return $result;
 }
@@ -94,9 +106,11 @@ sub finish {
     unless ( $self->{'finish'} or $self->{'scram'} ) {
         $self->{'finish'} = 1;
         $self->{'reactor'}->sync();
-        $self->{'reactor'}->push({'type' => &Cmr::Types::CMR_CLEANUP_TEMPORARY});
+#        $self->{'reactor'}->push({'type' => &Cmr::Types::CMR_CLEANUP_TEMPORARY});
         $self->{'reactor'}->finish();
-        $self->{'globber'}->finish();
+        for my $key (keys %{$self->{'globbers'}}) {
+            $self->{'globbers'}->{$key}->finish();
+        }
     }
 
     if ( $self->{'failed'} ) {
@@ -140,38 +154,36 @@ sub grep {
     # merge defaults, configuartion and passed args
     my %args = ( %defaults, %{$self->{'config'}}, %kwargs );
 
-    unless ( $self->{'reactor'}->{'output_path'} ) {
-        print STDERR "\nJob failed: No output path specified\n";
-        return $self->fail();
-    }
-
-
     print STDERR "Grep Started\n" if $args{'verbose'};
 
     my $part_id = 0;
-    my @paths = _reduce_input_set($args{'input'});
+#    my @paths = _reduce_input_set($args{'input'});
+    my @paths = @{$args{'input'}};
 
     for my $path (@paths) {
         my $batchsize = $args{'batch_size'} * $args{'batch_multiplier'};
 
-        $path =~ s/^(?!$args{'basepath'})/$args{'basepath'}\//o;
-        my $glob = $self->{'globber'}->PosixGlob($path);
+        for my $globber ('warehouse','user') {
+            my $glob    = $self->{globbers}->{$globber}->PosixGlob($path);
 
-        while ( my ($ext, $batch) = $glob->next($batchsize) ) {
-            map { s/^$args{'basepath'}//o; $_; } @$batch;
+            my $num_globs = 0;
+            while ( my ($ext, $batch) = $glob->pop($batchsize) ) {
 
-            $self->{'reactor'}->push({
-                'type'          =>  &Cmr::Types::CMR_GREP,
-                'patterns'      =>  $args{'patterns'},
-                'input'         =>  $batch,
-                'destination'   =>  sprintf("%s/%s-%d", $self->{'reactor'}->{'output_path'}, $args{'prefix'}, $part_id),
-                'ext'           =>  $ext,
-                'flags'         =>  $args{'flags'}
-            });
+                $self->{'reactor'}->push({
+                    'type'          =>  &Cmr::Types::CMR_GREP,
+                    'patterns'      =>  $args{'patterns'},
+                    'input'         =>  $batch,
+                    'output'   => sprintf("%s.%s", $args{'prefix'}, $part_id),
+                    'ext'           =>  'gz',
+                    'flags'         =>  $args{'flags'}
+                });
 
-            return $self->fail() if $self->{'reactor'}->failed();
+                return $self->fail() if $self->{'reactor'}->failed();
 
-            $part_id++;
+                $num_globs++;
+                $part_id++;
+            }
+            last if $num_globs > 0;
         }
     }
 
@@ -179,18 +191,25 @@ sub grep {
     print STDERR "waiting for all tasks to finish\n" if $args{'verbose'};
 
     $self->{'reactor'}->sync();
-    my @output = $self->{'reactor'}->get_job_output();
+#    my @output = $self->{'reactor'}->get_job_output();
     $self->{'reactor'}->clear_job_output();
     return $self->fail() if $self->{'reactor'}->failed();
 
+    # TODO: don't grab all of this at once... need a cursor
+    my @results = $self->{'job_index'}->get_pattern("$self->{'reactor'}->{'jid'}/.*");
 
-    print STDERR "merging output files\n" if $args{'verbose'};
-    if ( $args{'do_hierarchical_merge'} ) {
-        $self->hierarchical_merge("input"=>\@output);
-        return $self->fail() if $self->{'reactor'}->failed();
-    } else {
-        $self->sequential_merge("input"=>\@output);
-        # reactor isn't used for simple merge
+
+    if ($self->{'reactor'}->{'output_path'}) {
+        open(OUT, '>'."$self->{'reactor'}->{'output_path'}");
+        for my $result (@results) {
+            print OUT $$result;
+        }
+        close(OUT);
+    }
+    else {
+        for my $result (@results) {
+            print $$result;
+        }
     }
 
     print STDERR "Grep Finished\n" if $args{'verbose'};
@@ -203,7 +222,7 @@ sub hierarchical_reduce {
 
     my %defaults = (
         'prefix'            => 'reduce',
-        'reduce_batch_size' => 40,
+        'reduce_batch_size' => 20,
         'outfile'           => 'output',
     );
 
@@ -215,15 +234,12 @@ sub hierarchical_reduce {
     my $part_id = 0;
     my $part_depth = 0;
 
-    unless ( $self->{'reactor'}->{'output_path'} ) {
-        print STDERR "Job failed: No output path specified\n";
-        return;
-    }
-
     print STDERR "performing hierarchical reduce\n";
     while ( $#input >= $args{'reduce_batch_size'} ) {
         $index = 0;
         $part_id = 0;
+
+        $self->{'reactor'}->clear_job_output();
 
         while ( $index <= $#input ) {
 
@@ -233,29 +249,24 @@ sub hierarchical_reduce {
             }
 
             my @task_files = @input[$index..$eindex];
-            map { s/^$args{'basepath'}//o; $_; } @task_files;
+            my @batch = map { $self->{'job_index'}->get_locations("$self->{'reactor'}->{'jid'}/$_"); } @task_files;
 
             $self->{'reactor'}->push({
                 'type'          =>  &Cmr::Types::CMR_STREAM,
                 'reducer'       =>  $args{'reducer'},
-                'input'         =>  \@task_files,
-                'destination'   =>  sprintf("%s/%s-%d-%d", $self->{'reactor'}->{'output_path'}, $args{'prefix'}, $part_depth, $part_id),
+                'input'         =>  \@batch,
+                'output'        => sprintf("%s.%d.%d", $args{'prefix'}, $part_depth, $part_id),
             });
 
             $part_id++;
-            $index += $args{'reduce_batch_size'};
+            $index = $eindex+1;
         }
 
 
         $self->{'reactor'}->sync();
         my @output = $self->{'reactor'}->get_job_output();
-        $self->{'reactor'}->clear_job_output();
 
         return $self->fail() if $self->{'reactor'}->failed();
-
-        if ( @input ) {
-            $self->cleanup('input'=>\@input);
-        }
 
         @input = @output;
         $part_depth++;
@@ -266,34 +277,28 @@ sub hierarchical_reduce {
     if ($#input >= 0) {
         print STDERR "Starting Final Reduce\n";
 
-        my @task_files = @input[0..$#input];
-        map { s/^$args{'basepath'}//o; $_; } @task_files;
-
-        $self->{'reactor'}->push({
-            'type'          =>  &Cmr::Types::CMR_STREAM,
-            'reducer'       =>  $final_reducer,
-            'input'         =>  \@task_files,
-            'destination'   =>  sprintf("%s/%s", $self->{'reactor'}->{'output_path'}, $args{'outfile'}),
-        });
-
-        $self->{'reactor'}->sync();
         $self->{'reactor'}->clear_job_output();
 
+        my @task_files = @input[0..$#input];
+        my @batch = map { $self->{'job_index'}->get_locations("$self->{'reactor'}->{'jid'}/$_"); } @task_files;
+
+        my $task = {
+            'type'          =>  &Cmr::Types::CMR_STREAM,
+            'reducer'       =>  $final_reducer,
+            'input'         =>  \@batch,
+            'output'        => sprintf("%s.%d.%d", $args{'prefix'}, $part_depth, $part_id),
+        };
+
+        $task->{'persist'} = $args{'persist'} if exists $args{'persist'};
+        $self->{'reactor'}->push($task);
+        $self->{'reactor'}->sync();
         return $self->fail() if $self->{'reactor'}->failed();
-
-        $self->cleanup('input'=>\@input);
-    }
-
-    $self->{'reactor'}->sync();
-    $self->{'reactor'}->clear_job_output();
-
-    print STDERR "Finished Reduce\n";
-
-    if ($#input < 0) {
-        # No output
+    } else {
         print STDERR "Reduce produced no output\n";
     }
 
+    $self->{'reactor'}->sync();
+    print STDERR "Finished Reduce\n";
 
     return $self->fail() if $self->{'reactor'}->failed();
     return &SUCCESS;
@@ -307,6 +312,8 @@ sub sequential_merge {
         'prefix'            => 'merge',
         'outfile'           => 'output',
     );
+
+    #FIXME This is just broken right now
 
     # merge defaults, configuartion and passed args
     my %args = ( %defaults, %{$self->{'config'}}, %kwargs );
@@ -358,12 +365,14 @@ sub hierarchical_merge {
             }
 
             my @task_files = @input[$index..$eindex];
-            map { s/^$args{'basepath'}//o; $_; } @task_files;
+            my @batch = map { $self->{'job_index'}->get_locations("$self->{'reactor'}->{'jid'}/$_"); } @task_files;
+
+#            map { s/^$args{'basepath'}//o; $_; } @task_files;
 
             $self->{'reactor'}->push({
                 'type'          =>  &Cmr::Types::CMR_MERGE,
-                'input'         =>  \@task_files,
-                'destination'   =>  sprintf("%s/%s-%d-%d", $self->{'reactor'}->{'output_path'}, $args{'prefix'}, $part_depth, $part_id),
+                'input'         =>  \@batch,
+                'output'        =>  sprintf("%s.%d.%d", $args{'prefix'}, $part_depth, $part_id),
             });
 
             $part_id += 1;
@@ -376,11 +385,6 @@ sub hierarchical_merge {
         $self->{'reactor'}->clear_job_output();
         return $self->fail() if $self->{'reactor'}->failed();
 
-
-        if ( @input ) {
-            $self->cleanup('input'=>\@input);
-        }
-
         @input = @output;
         $part_depth++;
     }
@@ -389,19 +393,19 @@ sub hierarchical_merge {
         print STDERR "Starting Final Merge\n";
 
         my @task_files = @input[0..$#input];
-        map { s/^$args{'basepath'}//o; $_; } @task_files;
+#        map { s/^$args{'basepath'}//o; $_; } @task_files;
+
+        my @batch = map { $self->{'job_index'}->get_locations("$self->{'reactor'}->{'jid'}/$_"); } @task_files;
 
         $self->{'reactor'}->push({
             'type'          =>  &Cmr::Types::CMR_MERGE,
-            'input'         =>  \@task_files,
-            'destination'   =>  sprintf("%s/%s", $self->{'reactor'}->{'output_path'}, $args{'outfile'}),
+            'input'         =>  \@batch,
+            'output'        =>  sprintf("%s", $args{'outfile'}),
         });
 
         $self->{'reactor'}->sync();
         $self->{'reactor'}->clear_job_output();
         return $self->fail() if $self->{'reactor'}->failed();
-
-        $self->cleanup('input'=>\@input);
     }
 
     $self->{'reactor'}->sync();
@@ -442,32 +446,36 @@ sub stream {
     $fixed_args->{'mapper'}  = $args{'mapper'}  if exists $args{'mapper'};
     $fixed_args->{'reducer'} = $reducer if defined $reducer;
 
-    unless ( $self->{'reactor'}->{'output_path'} ) {
-        print STDERR "Job failed: No output path specified\n";
-        return;
-    }
+    my @paths = @{$args{'input'}};
 
-    my @paths = _reduce_input_set($args{'input'});
     for my $path (@paths) {
         my $batchsize = $args{'batch_size'} * $args{'batch_multiplier'};
 
-        $path =~ s/^(?!$args{'basepath'})/$args{'basepath'}\//o;
-        my $glob = $self->{'globber'}->PosixGlob($path);
-        while ( my ($ext, $batch) = $glob->next($batchsize) ) {
-            map { s/^$args{'basepath'}//o; $_; } @$batch;
+        for my $globber ('warehouse','user') {
+            my $glob    = $self->{globbers}->{$globber}->PosixGlob($path);
 
-            my $task_args = {
-                'input'         =>  $batch,
-                'ext'           =>  $ext,
-                'destination'   =>  sprintf("%s/%s-%d-%d", $self->{'reactor'}->{'output_path'}, $args{'prefix'}, $part_depth, $part_id),
-            };
+            my $num_globs = 0;
+            while ( my ($ext, $batch) = $glob->pop($batchsize) ) {
+                my $task_args = {
+                    'input'         =>  $batch,
+                    'ext'           =>  'gz',
+                    'output'        =>  sprintf("%s.%d.%d", $args{'prefix'}, $part_depth, $part_id),
+                };
 
-            my $cmd = {%$fixed_args, %$task_args};
-            $self->{'reactor'}->push($cmd);
+                if (!$reducer and $args{'persist'}) {
+                    # If there is no reducer, and data is meant to persist in seaweed, then when we complete these tasks we're done processing.
+                    $task_args->{'persist'} = $args{'persist'};
+                }
 
-            return $self->fail() if $self->{'reactor'}->failed();
+                my $cmd = {%$fixed_args, %$task_args};
+                $self->{'reactor'}->push($cmd);
+                return $self->fail() if $self->{'reactor'}->failed();
 
-            $part_id++;
+                $num_globs++;
+                $part_id++;
+            }
+            last if $num_globs > 0;
+
         }
     }
 
@@ -480,237 +488,64 @@ sub stream {
 
     if ($args{'reducer'}) {
         $self->hierarchical_reduce('reducer'=>$args{'reducer'}, 'input'=>\@output);
+        unless ($args{'persist'}) {
+            my @outputs = $self->{'reactor'}->get_job_output();
+            for my $output (@outputs) {
+                print STDERR "retrieving data for job $self->{'reactor'}->{'jid'}\n";
+                my @results = $self->{'job_index'}->get_pattern("$self->{'reactor'}->{'jid'}/$output");
+
+                if ($self->{'reactor'}->{'output_path'}) {
+                    open(OUT, '>'."$self->{'reactor'}->{'output_path'}");
+                    for my $result (@results) {
+                        print OUT $$result;
+                    }
+                    close(OUT);
+                }
+                else {
+                    for my $result (@results) {
+                        print $$result;
+                    }
+                }
+            }
+        }
+    } else {
+        # MAPPER ONLY
+        unless ($args{'persist'}) {
+            my @mappings = $self->{'job_index'}->get_mapping("$self->{'reactor'}->{'jid'}/.*");
+
+            if ( $self->{'reactor'}->{'output_path'} ) {
+                # OUTPUT -> output_path
+                system("mkdir -p $self->{'reactor'}->{'output_path'}");
+
+                my $part_id = 0;
+                for my $mapping (@mappings) {
+                    my ($file, $uri, $size) = @$mapping;
+                    system(qq(curl -s -H 'Accept-Encoding: gzip' ${uri} > "$self->{'reactor'}->{'output_path'}/part-${part_id}.gz"));
+                    $part_id++;
+                }
+            }
+            else {
+                # OUTPUT -> STDOUT
+                for my $mapping (@mappings) {
+                    my ($file, $uri, $size) = @$mapping;
+                    system("curl -s -H 'Accept-Encoding: gzip' ${uri} | gzip -dc");
+                }
+            }
+        }
     }
 
     return $self->fail() if $self->{'reactor'}->failed();
     return &SUCCESS;
 }
 
-
-sub merge_buckets {
+sub polymer {
     my ($self, %kwargs) = @_;
 
     my %defaults = (
-        'prefix'            => 'merge_bucket',
-        'merge_batch_size'  => 25,
-        'in_order'          => 0,
-        'delimiter'         => "",
-        'outfile'           => 'output',
-    );
-
-    # merge defaults, configuartion and passed args
-    my %args = ( %defaults, %{$self->{'config'}}, %kwargs );
-
-    my $input       = $args{'input'};
-    my $batchsize   = $args{'merge_batch_size'};
-
-    my @cleanup_files;
-
-    my $part_id = 0;
-    my $part_depth = 0;
-    my $done = 0;
-    while ( not $done ) {
-        my %bucket_map;
-
-        for my $i (0 .. $#{$input}) {
-            my $bucket = $input->[$i];
-
-            my $start_index = 0;
-            my $part_id = 0;
-
-            for my $file (@$bucket) {
-                push @cleanup_files, $file;
-            }
-
-            while ( $start_index <= $#{$bucket} ) {
-                my $end_index = $start_index + $args{'merge_batch_size'}-1;
-                if ( $end_index > $#{$bucket} ) {
-                    $end_index = $#{$bucket};
-                }
-
-                my @task_files = @{$bucket}[ $start_index .. $end_index ];
-                map { s/^$args{'basepath'}//o; $_; } @task_files;
-
-                my $file = sprintf("%s/%s-%d-%d-%d", $self->{'reactor'}->{'output_path'}, $args{'prefix'}, $part_id, $part_depth, $i);
-
-                $self->{'reactor'}->push({
-                    'type'          =>  &Cmr::Types::CMR_MERGE,
-                    'input'         =>  \@task_files,
-                    'destination'   =>  $file,
-                    'in_order'      =>  $args{'in_order'},
-                    'delimiter'     =>  $args{'delimiter'},
-                });
-
-                # Keep a mapping files -> buckets
-                $bucket_map{$file} = $i;
-
-                $start_index += $batchsize;
-                $part_id++;
-            }
-            $input->[$i] = [];
-        }
-
-        $self->{'reactor'}->sync();
-        my @new_input_files = $self->{'reactor'}->get_job_output();
-        $self->{'reactor'}->clear_job_output();
-
-        for my $file (@new_input_files) {
-            # Match up each file with its originating bucket
-            if ( defined ($bucket_map{$file}) ) {
-                push @{$input->[$bucket_map{$file}]}, $file;
-            }
-            else {
-                # This should never happen...
-                print STDERR "Why does this keep happening!?\n";
-            }
-        }
-
-        $part_depth++;
-
-        # Assume done
-        $done = 1;
-        for my $i (0 .. $#{$input}) {
-            if ( scalar(@{$input->[$i]}) > 1 ) {
-                # Set not done if any of the buckets contain more than one file
-                $done = 0;
-                last;
-            }
-        }
-    }
-
-    $self->{'reactor'}->sync();
-    $self->{'reactor'}->clear_job_output();
-
-    print STDERR "done merge\n";
-
-    $self->cleanup('input'=>\@cleanup_files);
-    $self->{'reactor'}->sync();
-    $self->{'reactor'}->clear_job_output();
-
-    print STDERR "done cleanup\n";
-
-    return $input;
-}
-
-
-sub reduce_buckets {
-    my ($self, %kwargs) = @_;
-
-    my %defaults = (
-        'prefix'            => 'reduce_bucket',
-        'reduce_batch_size' => 40,
-        'final_reduce'      => 0,
-        'outfile'           => 'output',
-    );
-
-    # merge defaults, configuartion and passed args
-    my %args = ( %defaults, %{$self->{'config'}}, %kwargs );
-    my $input           = $args{'input'};
-    my $batchsize       = $args{'reduce_batch_size'};
-    my $part_depth      = 0;
-
-    my %bucket_map;
-    my @cleanup_files;
-
-    my $done = 0;
-    while (!$done) {
-        for my $i (0 .. $#{$input}) {
-
-            my $bucket = $input->[$i];
-            my $start_index = 0;
-            my $part_id = 0;
-
-            for my $file (@$bucket) {
-                push @cleanup_files, $file;
-            }
-
-            my $last_reduce = 0;
-            if ( $#{$bucket} < $batchsize ) {
-                $last_reduce = 1;
-            }
-
-            while ( $start_index <= $#{$bucket} ) {
-                my $end_index = $start_index + $batchsize-1;
-
-                if ( $end_index > $#{$bucket} ) {
-                    $end_index = $#{$bucket};
-                }
-
-                my @task_files = @{$bucket}[ $start_index .. $end_index ];
-                map { s/^$args{'basepath'}//o; $_; } @task_files;
-
-                my $file = sprintf("%s/%s-%d-%d-%d", $self->{'reactor'}->{'output_path'}, $args{'prefix'}, $part_id, $part_depth, $i);
-
-                if ( $args{'final_reduce'} and $last_reduce and $args{'final_reducer'} ) {
-                    $self->{'reactor'}->push({
-                        'type'          =>  &Cmr::Types::CMR_STREAM,
-                        'reducer'       =>  $args{'final_reducer'},
-                        'input'         =>  \@task_files,
-                        'destination'   =>  $file,
-                    });
-                }
-                else {
-                    $self->{'reactor'}->push({
-                        'type'          =>  &Cmr::Types::CMR_STREAM,
-                        'reducer'       =>  $args{'reducer'},
-                        'input'         =>  \@task_files,
-                        'destination'   =>  $file,
-                    });
-                }
-
-                # Keep a mapping files -> buckets
-                $bucket_map{$file} = $i;
-
-                $start_index += $batchsize;
-                $part_id++;
-            }
-
-            $input->[$i] = [];
-        }
-
-        $self->{'reactor'}->sync();
-        my @new_input_files = $self->{'reactor'}->get_job_output();
-        $self->{'reactor'}->clear_job_output();
-
-        for my $file (@new_input_files) {
-            if ( defined ($bucket_map{$file}) ) {
-                push @{$input->[$bucket_map{$file}]}, $file;
-            }
-            else {
-                # This should never happen...
-                print STDERR "Why does this keep happening!?\n";
-            }
-        }
-
-        $part_depth++;
-
-        $done = 1;
-        for my $i (0 .. $#{$input}) {
-            if ( scalar(@{$input->[$i]}) > 1 ) {
-                $done = 0;
-            }
-        }
-    }
-
-    $self->{'reactor'}->sync();
-    $self->{'reactor'}->clear_job_output();
-
-    $self->cleanup('input'=>\@cleanup_files);
-    $self->{'reactor'}->sync();
-    $self->{'reactor'}->clear_job_output();
-
-    return $input;
-}
-
-sub bucket_stream {
-    my ($self, %kwargs) = @_;
-
-    my %defaults = (
-        'prefix'            => 'bucket',
-        'batch_size'        => 16,
+        'prefix'            => 'polymer',
+        'batch_size'        => 4,
         'batch_multiplier'  => 1,
-        'buckets'           => 16,
-        'delimiter'         => "",
+        'outfile'           => 'output',
     );
 
     # merge defaults, configuartion and passed args
@@ -721,242 +556,239 @@ sub bucket_stream {
         return $self->fail();
     }
 
-    my $map_id = 0;
-    my @paths = _reduce_input_set($args{'input'});
-    for my $path (@paths) {
-    
-        my $batchsize = $args{'batch_size'} * $args{'batch_multiplier'};
-        $path =~ s/^(?!$args{'basepath'})/$args{'basepath'}\//o;
-        my $glob = $self->{'globber'}->PosixGlob($path);
-        
-        while ( my ($ext, $batch) = $glob->next($batchsize) ) {
-            map { s/^$args{'basepath'}//o; $_; } @$batch;
+    my $log = Cmr::StartupUtils::get_logger();
 
-            my $file = sprintf("%s/this_is_a_bit_of_a_hack", $self->{'reactor'}->{'output_path'});
+    print STDERR "Polymer Started\n" if $args{'verbose'};
 
-            $self->{'reactor'}->push({
-                'type'                  => &Cmr::Types::CMR_BUCKET,
-                'mapper'                => $args{'mapper'},
-                'buckets'               => $args{'buckets'},
-                'delimiter'             => $args{'delimiter'},
-                'input'                 => $batch,
-                'ext'                   => $ext,
-                'map_id'                => $map_id,
-                'destination'           => $file,
-            });
+    my $output_path = $self->{'reactor'}->{'output_path'};
 
-            return $self->fail() if $self->{'reactor'}->failed();
-            $map_id++;
+    my $fields        = $args{'field'};
+    my @inputs        = @{$args{'input'}//[]};
+    my $mapper        = $args{'mapper'}  // undef;
+    my $reducer       = $args{'reducer'} // undef;
+    my $include       = $args{'include'} // [];
+    my $exclude       = $args{'exclude'} // [];
+    my $include_range = $args{'include-range'} // [];
+    my $exclude_range = $args{'exclude-range'} // [];
+
+    # Translate field names into positions for awk's sake!
+    my @print_fields;
+    my @filter_only;
+    my @collect_fields;
+    my @filter_include;
+    my @filter_exclude;
+    my @filter_include_range;
+    my @filter_exclude_range;
+    my %field_pos;
+    my $awk_pos = 1;
+
+    for my $idx ( 0 .. $#{$fields} ) {
+        my ($field) = $fields->[$idx];
+        my $pos = $field_pos{$field};
+        if ( ! $pos ) {
+            $pos = $awk_pos++;
+            $field_pos{$field} = $pos;
+            push @print_fields, $pos;
+            push @collect_fields, $field;
         }
     }
 
+    for my $idx ( 0 .. $#{$include} ) {
+        my ($delimiter) = $include->[$idx] =~ /[\d\w\.]+(.)?/o;
+        next unless defined($delimiter);
+        my ($field, $filter) = split(/$delimiter/, $include->[$idx]);
+        next unless defined($field) and defined($filter);
+        my $pos = $field_pos{$field};
+        if ( ! $pos ) {
+            $pos = $awk_pos++;
+            $field_pos{$field} = $pos;
+            push @filter_only, $pos;
+            push @collect_fields, $field;
+        }
+        push @filter_include, [$pos, $filter];
+    }
+
+    for my $idx ( 0 .. $#{$exclude} ) {
+        my ($delimiter) = $exclude->[$idx] =~ /[\d\w\.]+(.)?/o;
+        next unless defined($delimiter);
+        my ($field, $filter) = split(/$delimiter/, $exclude->[$idx]);
+        next unless defined($field) and defined($filter);
+        my $pos = $field_pos{$field};
+        if ( ! $pos ) {
+            $pos = $awk_pos++;
+            $field_pos{$field} = $pos;
+            push @filter_only, $pos;
+            push @collect_fields, $field;
+        }
+        push @filter_exclude, [$pos, $filter];
+    }
+
+    for my $idx ( 0 .. $#{$include_range} ) {
+        my ($delimiter) = $include_range->[$idx] =~ /[\d\w\.]+(.)?/o;
+        next unless defined($delimiter);
+        my ($field, $range_low, $range_high) = split(/$delimiter/, $include_range->[$idx]);
+        next unless defined($field) and defined($range_low) and defined($range_high);
+        my $pos = $field_pos{$field};
+        if ( ! $pos ) {
+            $pos = $awk_pos++;
+            $field_pos{$field} = $pos;
+            push @filter_only, $pos;
+            push @collect_fields, $field;
+        }
+        push @filter_include_range, [$pos, $range_low, $range_high];
+    }
+
+    for my $idx ( 0 .. $#{$exclude_range} ) {
+        my ($delimiter) = $exclude_range->[$idx] =~ /[\d\w\.]+(.)?/o;
+        next unless defined($delimiter);
+        my ($field, $range_low, $range_high) = split(/$delimiter/, $exclude_range->[$idx]);
+        next unless defined($field) and defined($range_low) and defined($range_high);
+        my $pos = $field_pos{$field};
+        if ( ! $pos ) {
+            $pos = $awk_pos++;
+            $field_pos{$field} = $pos;
+            push @filter_only, $pos;
+            push @collect_fields, $field;
+        }
+        push @filter_exclude_range, [$pos, $range_low, $range_high];
+    }
+    my $fixed_args = {};
+
+    if ( scalar(@filter_only) > 0 ) {
+        # Some fields are needed to filter lines, but aren't wanted in the output
+        $fixed_args->{'print-fields'} = \@print_fields;
+    }
+    else {
+        # Whole output line is desired ( awk index 0 )
+        $fixed_args->{'print-fields'} = [0];
+    }
+
+    $fixed_args->{'type'}                 = &Cmr::Types::CMR_POLYMER;
+    $fixed_args->{'fields'}               = \@collect_fields;
+    $fixed_args->{'filter-include'}       = \@filter_include if @filter_include;
+    $fixed_args->{'filter-exclude'}       = \@filter_exclude if @filter_exclude;
+    $fixed_args->{'filter-include-range'} = \@filter_include_range if @filter_include_range;
+    $fixed_args->{'filter-exclude-range'} = \@filter_exclude_range if @filter_exclude_range;
+    $fixed_args->{'mapper'}               = $mapper  if $mapper;
+    $fixed_args->{'reducer'}              = $reducer if $reducer;
+
+    my $part_id = 0;
+    my @paths = @{$args{'input'}};
+
+    for my $path (@paths) {
+#        my $batchsize = $args{'batch_size'} * $args{'batch_multiplier'};
+        my $batchsize = 10;
+        for my $globber ('warehouse','user') {
+            my $glob    = $self->{globbers}->{$globber}->PosixGlob($path);
+            if ( $self->{'config'}->{'verbose'} ) { print STDERR "Submitting tasks\n"; }
+
+            my $num_globs = 0;
+            while ( my ($ext, $batch) = $glob->pop($batchsize) ) {
+                my $task_args = {
+                    'input'  => $batch,
+                    'ext'    => 'gz',
+                    'output' => sprintf("%s.%s", $args{'prefix'}, $part_id)
+                };
+
+                if (!$reducer and $args{'persist'}) {
+                    # If there is no reducer, and data is meant to persist in seaweed, then when we complete these tasks we're done processing.
+                    $task_args->{'persist'} = $args{'persist'};
+                }
+
+                my $cmd = {%$fixed_args, %$task_args};
+                $self->{'reactor'}->push($cmd);
+                return $self->fail() if $self->{'reactor'}->failed();
+
+                $part_id++;
+                $num_globs++;
+            }
+            last if $num_globs > 0;
+        }
+    }
+
+    if ( $self->{'config'}->{'verbose'} ) { print STDERR "waiting for all tasks to finish\n"; }
     $self->{'reactor'}->sync();
-    my @outputs = $self->{'reactor'}->get_job_output();
+    my @output = $self->{'reactor'}->get_job_output();
     $self->{'reactor'}->clear_job_output();
-
-
-    # -- Merge files ( in order merge )
-    my $merged_buckets  = $self->merge_buckets('input'=>\@outputs, 'in_order'=>1);
     return $self->fail() if $self->{'reactor'}->failed();
 
     if ($args{'reducer'}) {
-        my $reduced_buckets = $self->reduce_buckets('input'=>$merged_buckets, 'reducer'=>$args{'reducer'}, 'final_reduce'=>1);
-        return $self->fail() if $self->{'reactor'}->failed();
+        $self->hierarchical_reduce('reducer'=>$args{'reducer'}, 'input'=>\@output);
+        unless ($args{'persist'}) {
+            my @outputs = $self->{'reactor'}->get_job_output();
+            for my $output (@outputs) {
+                print STDERR "retrieving data for job $self->{'reactor'}->{'jid'}\n";
+                my @results = $self->{'job_index'}->get_pattern("$self->{'reactor'}->{'jid'}/$output");
 
-        my @reduced_files;
-        for my $bucket (@$reduced_buckets) {
-            for my $file (@$bucket) {
-                push @reduced_files, $file;
+                if ($self->{'reactor'}->{'output_path'}) {
+                    open(OUT, '>'."$self->{'reactor'}->{'output_path'}");
+                    for my $result (@results) {
+                        print OUT $$result;
+                    }
+                    close(OUT);
+                }
+                else {
+                    for my $result (@results) {
+                        print $$result;
+                    }
+                }
             }
         }
-
-        print STDERR "merging output files\n" if $args{'verbose'};
-        if ( $args{'do_hierarchical_merge'} ) {
-            $self->hierarchical_merge("input"=>\@reduced_files);
-            return $self->fail() if $self->{'reactor'}->failed();
-        } else {
-            $self->sequential_merge("input"=>\@reduced_files);
-            # reactor isn't used for simple merge
-        }
-
-        return $self->fail() if $self->{'reactor'}->failed();
-    }
-
-    return &SUCCESS;
-}
-
-
-sub bucket_join {
-my ($self, %kwargs) = @_;
-
-    my %defaults = (
-        'num_buckets'       => 8,
-        'batch_size'        => 16,
-        'batch_multiplier'  => 1,
-        'delimiter'         => '',
-        'outfile'           => 'output',
-    );
-
-    # merge defaults, configuartion and passed args
-    my %args = ( %defaults, %{$self->{'config'}}, %kwargs );
-
-    unless ( $self->{'reactor'}->{'output_path'} ) {
-        print STDERR "\nJob failed: No output path specified\n";
-        return $self->fail();
-    }
-    
-    my $map_id = 0;
-    my @paths = _reduce_input_set($args{'input'});
-    for my $path (@paths) {
-        my $batchsize = $args{'batch_size'} * $args{'batch_multiplier'};
-        $path =~ s/^(?!$args{'basepath'})/$args{'basepath'}\//o;
-        my $glob = $self->{'globber'}->PosixGlob($path);
-        while ( my ($ext, $batch) = $glob->next($batchsize) ) {
-            map { s/^$args{'basepath'}//o; $_; } @$batch;
-
-            my $not_a_real_file = sprintf("%s/this_is_a_bit_of_a_hack", $self->{'reactor'}->{'output_path'});
-
-            $self->{'reactor'}->push({
-                'type'          =>  &Cmr::Types::CMR_BUCKET,
-                'mapper'        =>  $args{'mapper'},
-                'buckets'       =>  $args{'num_buckets'},
-                'delimiter'     =>  $args{'delimiter'},
-                'join'          =>  1,
-                'input'         =>  $batch,
-                'ext'           =>  $ext,
-                'map_id'        =>  $map_id,
-                'destination'   =>  $not_a_real_file,
-                'prefix'        => 'bucket',
-            });
-
-            $self->fail() if $self->{'reactor'}->failed();
-            $map_id++;
-        }
-    }
-
-    $self->{'reactor'}->sync();
-    my @outputs = $self->{'reactor'}->get_job_output();
-    $self->{'reactor'}->clear_job_output();
-
-
-    # -- Merge files ( in order merge )
-    my $merged_buckets  = $self->merge_buckets('input'=>\@outputs, 'in_order'=>1);
-    return $self->fail() if $self->{'reactor'}->failed();
-
-    # -- Reduce files :
-    # For each secondary key range invoke the join-reducer
-    my $reduced_buckets = $self->reduce_buckets('input'=>$merged_buckets, 'reducer'=>$args{'join_reducer'}, 'prefix'=>'join_reduce', 'join'=>1);
-    return $self->fail() if $self->{'reactor'}->failed();
-
-    my @reduced_files;
-    for my $bucket (@$reduced_buckets) {
-        for my $file (@$bucket) {
-            push @reduced_files, $file;
-        }
-    }
-
-    # We're not done yet, time to go through the entire process again...
-    # -- Rebucket files ( this time on primary key )
-    $map_id = 0;
-    for my $file (@reduced_files) {
-        $file =~ s/^$args{'basepath'}//o;
-        my $not_a_real_file = sprintf("%s/this_is_a_bit_of_a_hack", $self->{'reactor'}->{'output_path'});
-   
-        $self->{'reactor'}->push({
-            'type'          =>  &Cmr::Types::CMR_BUCKET,
-            'buckets'       =>  $args{'num_buckets'},
-            'join'          =>  $args{'join'},
-            'strip_joinkey' =>  1,
-            'delimiter'     =>  $args{'delimiter'},
-            'input'         =>  [$file],
-            'map_id'        =>  $map_id,
-            'destination'   =>  $not_a_real_file,
-            'prefix'        => 'rebucket',
-        });
-
-        $self->fail() if $self->{'reactor'}->failed();
-        $map_id++;
-    }
-
-    $self->{'reactor'}->sync();
-    @outputs = $self->{'reactor'}->get_job_output();
-    $self->{'reactor'}->clear_job_output();
-
-    # -- Merge files ( in order merge )
-    $merged_buckets  = $self->merge_buckets('input'=>\@outputs, 'in_order'=>1);
-    return $self->fail() if $self->{'reactor'}->failed();
-
-    # -- Reduce files :
-    # For each secondary key range invoke the join-reducer
-    $reduced_buckets = $self->reduce_buckets('input'=>$merged_buckets, 'reducer'=>$args{'reducer'}, 'prefix'=>'final_reduce', 'final_reduce'=>1);
-    return $self->fail() if $self->{'reactor'}->failed();
-
-    @reduced_files = ();
-    for my $bucket (@$reduced_buckets) {
-        for my $file (@$bucket) {
-            push @reduced_files, $file;
-        }
-    }
-
-    # -- Merge the partitions
-    print STDERR "merging output files\n" if $args{'verbose'};
-    if ( $args{'do_hierarchical_merge'} ) {
-        $self->hierarchical_merge("input"=>\@reduced_files);
-        return $self->fail() if $self->{'reactor'}->failed();
     } else {
-        $self->sequential_merge("input"=>\@reduced_files);
-        # reactor isn't used for simple merge
+        # MAPPER ONLY
+        unless ($args{'persist'}) {
+            my @mappings = $self->{'job_index'}->get_mapping("$self->{'reactor'}->{'jid'}/.*");
+
+            if ( $self->{'reactor'}->{'output_path'} ) {
+                # OUTPUT -> output_path
+                system("mkdir -p $self->{'reactor'}->{'output_path'}");
+
+                my $part_id = 0;
+                for my $mapping (@mappings) {
+                    my ($file, $uri, $size) = @$mapping;
+                    system(qq(curl -s -H 'Accept-Encoding: gzip' ${uri} > "$self->{'reactor'}->{'output_path'}/part-${part_id}.gz"));
+                    $part_id++;
+                }
+            }
+            else {
+                # OUTPUT -> STDOUT
+                for my $mapping (@mappings) {
+                    my ($file, $uri, $size) = @$mapping;
+                    system("curl -s -H 'Accept-Encoding: gzip' ${uri} | gzip -dc");
+                }
+            }
+        }
     }
 
     return $self->fail() if $self->{'reactor'}->failed();
+
+    if ( $self->{'config'}->{'verbose'} ) { print STDERR "Polymer Finished\n"; }
     return &SUCCESS;
 }
+
 
 sub cleanup {
     my ($self, %kwargs) = @_;
 
     my %defaults = (
-        'prefix'                => 'cleanup',
-        'cleanup_batch_size'    => 25,
-        'outfile'               => 'output',
+        'prefix'            => 'cleanup',
+        'batch_size'        => 1,
+        'batch_multiplier'  => 1,
+        'outfile'           => 'output',
     );
 
     # merge defaults, configuartion and passed args
     my %args = ( %defaults, %{$self->{'config'}}, %kwargs );
 
-    my $part_id = 0;
-    my @input = @{$args{'input'}};
-    my $index = 0;
+    my ($user, undef, undef, undef, undef, undef, undef, undef, undef) = getpwuid($<);
 
-    unless ( $self->{'reactor'}->{'output_path'} ) {
-        print STDERR "Job failed: No output path specified\n";
-        return;
+    my $collection = $self->{'user_index'}->get_collection("$args{'cleanup'}/*");
+    return unless $collection =~ /^user_${user}/o;
+
+    if ($collection) {
+        $self->{'user_index'}->delete_hash($args{'cleanup'});
+        system("curl -s $args{seaweed_addr}/col/delete?collection=${collection}");
     }
-
-    while ( $index <= $#input ) {
-
-        my $eindex = $index + $args{'cleanup_batch_size'}-1;
-        if ( $eindex > $#input ) {
-            $eindex = $#input;
-        }
-
-        my @task_files = @input[$index..$eindex];
-        map { s/^$args{'basepath'}//o; $_; } @task_files;
-
-        $self->{'reactor'}->push({
-            'type'          =>  &Cmr::Types::CMR_CLEANUP,
-            'input'         =>  \@task_files,
-            'destination'   =>  sprintf("%s/%s-%d", $self->{'reactor'}->{'output_path'}, $args{'prefix'}, $part_id),
-        });
-
-        $part_id++;
-        $index += $args{'cleanup_batch_size'};
-    }
-
-    # NOTE: cleanup does not sync
-
-    return $self->fail() if $self->{'reactor'}->failed();
-    return &SUCCESS;
 }
 
 

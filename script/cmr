@@ -41,10 +41,10 @@ my ($log, $config) = Cmr::StartupUtils::script_init({
         ['join-reducer|j=s',    'reducer to use for join [requires bucket and aggregate parameters to be specified]'],
         ['input|i=s@',          'input path (accepts glob pattern)'],
         ['output|o=s',          'output path'],
+        ['persist|p=s',         'persist job output at a specified path in seaweed'],
+        ['cleanup|c=s',         'clean up a persisted path in seaweed'],
         ['bundle|b=s@',         'bundle file with job'],
         ['force|F',             'force run (Will attempt to delete everything in the path specified by output before running)'],
-        ['bucket|B',            '[experimental] [bucket] split job into buckets to partition reduce'],
-        ['delimiter|d=s',       '[experimental] [bucket] delimiter used to seperate key from aggregates'],
 
     ],
     'no_lock' => 1,
@@ -52,9 +52,18 @@ my ($log, $config) = Cmr::StartupUtils::script_init({
 
 my $cmr = Cmr::Client::new($config);
 
-$SIG{'INT'} = sub { $cmr->scram(); };
+$SIG{'INT'} = sub { 
+$cmr->scram(); 
+my $jid = $cmr->{'reactor'}->{'jid'};
+`curl -s $config->{global}->{seaweed_addr}/col/delete?collection=job_${jid}`;
+`redis-cli -n 1 KEYS "job/${jid}*" | xargs redis-cli -n 1 DEL`;
+`redis-cli -n 1 HDEL job ${jid}`;
+};
 
-if ( $config->{'bucket'} and $config->{'join_reducer'} ) {
+if ( $config->{'cleanup'} ) {
+    $cmr->cleanup();
+}
+elsif ( $config->{'bucket'} and $config->{'join_reducer'} ) {
     $cmr->bucket_join();
 }
 elsif ( $config->{'bucket'} ) {
@@ -63,6 +72,13 @@ elsif ( $config->{'bucket'} ) {
 else {
     $cmr->stream();
 }
+
+my $jid = $cmr->{'reactor'}->{'jid'};
+
+# TODO: api all of this stuff
+`curl -s $config->{global}->{seaweed_addr}/col/delete?collection=job_${jid}`;
+`redis-cli -n 1 KEYS "job/${jid}*" | xargs redis-cli -n 1 DEL`;
+`redis-cli -n 1 HDEL job ${jid}`;
 
 if ( $cmr->failed() ) {
     $cmr->scram();

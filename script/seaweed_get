@@ -1,3 +1,5 @@
+#!/usr/bin/perl
+
 #
 #   Copyright (C) 2014 Chitika Inc.
 #
@@ -18,30 +20,26 @@
 #   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-package Cmr::StartupUtils::StartupLogTrap;
-#use parent Cmr::StartupUtils;
-
-## Trapper for messages logged to stderr that should have gone to the logger
-
-our $VERSION = '0.1';
-
 use strict;
 use warnings;
 
-use Log::Log4perl qw(:easy);
-#use Cmr::StartupUtils ();
+binmode STDIN,  ':utf8';
+binmode STDOUT, ':utf8';
+binmode STDERR, ':utf8';
+use open ':utf8';
 
-sub TIEHANDLE {
-    my $class = shift;
-    bless [], $class;
+use HTTP::Request::Common;
+use Furl;
+
+#my $furl = Furl->new() or die "failed to create furl object\n";
+my $furl = Furl->new(headers => ['Accept-Encoding' => 'gzip,deflate', 'Connection' => 'close']) or die "failed to create furl object\n";
+
+for my $arg (@ARGV) {
+
+#    print STDERR "GET: ", $arg, "\n";
+    my $res = $furl->get($arg);
+#    print STDERR "STATUS: ", $res->status(), "\n";
+    if ($res->status() == 200) {
+        print $res->decoded_content();
+    }
 }
-
-sub PRINT {
-    my $self = shift;
-    $Log::Log4perl::caller_depth++;
-    my $logger = Cmr::StartupUtils::get_logger();
-    $logger->error(@_);
-    $Log::Log4perl::caller_depth--;
-}
-
-1;

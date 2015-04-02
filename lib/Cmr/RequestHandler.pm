@@ -32,7 +32,7 @@ use Cmr::StartupUtils ();
 
 use File::Basename qw(dirname);
 use Cwd qw(abs_path);
-use lib dirname (abs_path(__FILE__));
+use lib dirname (abs_path(__FILE__))."/..";
 
 use Cmr::Types;
 
@@ -49,72 +49,15 @@ sub handle_request_local {
 }
 
 sub handle_request($$$$) {
-    my ($self, $request, $config, $reactor) = @_;
+    my ($self, $request, $reactor_self, $config, $reactor) = @_;
     my $log = Cmr::StartupUtils::get_logger();
 
     my $task = $request->{'data'};
     $task->{'started_time'} = Time::HiRes::gettimeofday;
-
     $task->{'wslot'} = $reactor->{'id'};
 
     $task->{'result'} = &Cmr::Types::CMR_RESULT_FAILURE;
-
-    # Setup output paths
-    my $out_file = sprintf("%s/%s", $config->{'basepath'}, $task->{'destination'});
-    my $out_path = $out_file;
-    $out_path =~ s/\/[^\/]*$//o;
-    $task->{'out_path'} = $out_path;
- 
-
-    # Working around some gluster issues (client desync)
-    my $retries = 30;
-    while ( $retries > 0 && !(-e $out_path) ) {
-      $retries--;
-      system("ls -l $out_path > /dev/null 2>&1");
-      Time::HiRes::nanosleep(0.3*1e9);
-    }
-    $task->{'retries'} = (30 - $retries);
-
-
-    # Make sure the out path exists
-    if (! -e $out_path) {
-        # Not our problem, the client was supposed to create this
-        $task->{'result'} = &Cmr::Types::CMR_RESULT_MISSING_OUT_PATH;
-        $self->{'queue'}->enqueue($task);
-        return;
-    }
-
-    # Setup input path
-    my $input = "";
-    if ($task->{'input'}) {
-        for my $file (@{$task->{'input'}}) {
-            # Prepend input files with warehouse basepath (stripped by client)
-            $input .= sprintf("%s/%s ", $config->{'basepath'}, $file);
-            next if $task->{'type'} == &Cmr::Types::CMR_CLEANUP;
-
-            # More Working around some gluster issues (client desync)
-            my $more_retries = 30;
-            while ( $more_retries > 0 && !(-e "$config->{'basepath'}/$file") ) {
-              $more_retries--;
-              system("ls -l $config->{'basepath'}/$file > /dev/null 2>&1");
-              Time::HiRes::nanosleep(0.1*1e9);
-            }
-
-            $task->{'retries'} = (30 - $more_retries);
-        }
-    }
-
-    # Handle the request
-    $task->{'result'} = $self->handle_request_local($task, $config, $input, $out_file);
-
-    # If no output was produced tell the client so it doesn't waste a bunch of time working on an empty files
-    if (-z ${out_file}) {
-      $task->{'zerobyte'} = 1;
-      if ($config->{'delete_zerobyte_output'}) {
-        system("rm -f ${out_file}");
-      }
-    }
-
+    $task->{'result'} = $self->handle_request_local($task, $config);
 
     $self->{'queue'}->enqueue($task);
     return;
@@ -134,6 +77,8 @@ sub task_exec {
         }
 
         if ($rc != 0) {
+            $task->{'warnings'} = 1;
+            $task->{'errors'} = "RC: $rc\n???\n";
             #TODO: figure out what happened
         }
     }

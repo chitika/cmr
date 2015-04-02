@@ -31,11 +31,10 @@ use Digest::MD5 qw(md5_hex);
 
 use Cmr::Types;
 use Cmr::RequestHandler;
-use Cmr::RequestHandler::Bucket;
 use Cmr::RequestHandler::Grep;
 use Cmr::RequestHandler::Stream;
-use Cmr::RequestHandler::Cleanup;
 use Cmr::RequestHandler::Merge;
+use Cmr::RequestHandler::Polymer;
 use Cmr::StartupUtils ();
 use Cmr::ReactorAsync ();
 
@@ -46,22 +45,20 @@ my $tasks_pending :shared;
 my $q               = Thread::Queue->new();
 
 # Initialize all of the request handlers
-my $BucketHandler   = Cmr::RequestHandler::Bucket->new($q);
 my $GrepHandler     = Cmr::RequestHandler::Grep->new($q);
 my $StreamHandler   = Cmr::RequestHandler::Stream->new($q);
-my $CleanupHandler  = Cmr::RequestHandler::Cleanup->new($q);
 my $MergeHandler    = Cmr::RequestHandler::Merge->new($q);
+my $PolymerHandler  = Cmr::RequestHandler::Polymer->new($q);
 
 my $handlers = {
 
-  &Cmr::Types::CMR_BUCKET   => sub { $BucketHandler->handle_request(@_); },
   &Cmr::Types::CMR_GREP     => sub { $GrepHandler->handle_request(@_); },
   &Cmr::Types::CMR_STREAM   => sub { $StreamHandler->handle_request(@_); },
-  &Cmr::Types::CMR_CLEANUP  => sub { $CleanupHandler->handle_request(@_); },
   &Cmr::Types::CMR_MERGE    => sub { $MergeHandler->handle_request(@_); },
+  &Cmr::Types::CMR_POLYMER  => sub { $PolymerHandler->handle_request(@_); },
 
   &Cmr::Types::CMR_CLEANUP_TEMPORARY => sub {
-    my ($event, $config, $self) = @_;
+    my ($event, $self, $config, $reactor) = @_;
     my $task = $event->{'data'};
     $task->{'started_time'} = Time::HiRes::gettimeofday;
 
@@ -91,7 +88,7 @@ my $handlers = {
 
   &Cmr::Types::CMR_REJECT   => sub {
     # The reject handler doesn't pass through the default request handler in order to minimize wasted effort
-    my ($event, $config, $self) = @_;
+    my ($event, $self, $config, $reactor) = @_;
     my $task = $event->{'data'};
     $task->{'started_time'} = Time::HiRes::gettimeofday;
     $task->{'result'} = &Cmr::Types::CMR_RESULT_WORKER_REJECT;
@@ -107,19 +104,11 @@ my ($log, $config) = Cmr::StartupUtils::script_init({
    'no_lock' => 1,
 });
 
-unless ($config->{'basepath'}) { die "No basepath configured"; }
-my $rc = opendir(my $dir, $config->{'basepath'});
-if (!$rc) { die "basepath check failed"; }
-my @contents =  grep (!/^\./o, readdir($dir));
-closedir($dir);
-die "basepath is empty... datapocalypse?" unless @contents;
-
-
 my $completion_thread = threads->create(\&completion_main, {'config' => $config});
 
-my $ev = Cmr::ReactorAsync::init( 
-  $handlers, 
+my $ev = Cmr::ReactorAsync::new(
   $config,
+  $handlers, 
 );
 
 use NanoMsg::Raw;

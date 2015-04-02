@@ -43,6 +43,7 @@ typedef struct ProcInfo_T {
     int err_fd;
     int err_read_fd;
     int out_fd;
+    int out_read_fd;
     int no_stdout;
     int no_stderr;
 } ProcInfo;
@@ -112,6 +113,7 @@ int main(int argc, char* argv[]) {
         processes[i].err_fd = WRITE_END(err);
         processes[i].err_read_fd = READ_END(err); // We'll use this later to collect error output
         processes[i].out_fd = WRITE_END(out);
+        processes[i].out_read_fd = READ_END(out);
         processes[i].no_stdout = 0;
         processes[i].no_stderr = 0;;
 
@@ -177,6 +179,9 @@ int main(int argc, char* argv[]) {
         posix_spawn_file_actions_adddup2(&action, processes[i].out_fd, 1);
         if ( processes[i].out_fd != WRITE_END(out) ) {
             posix_spawn_file_actions_addclose(&action, WRITE_END(out));
+            in = 0;
+        } else {
+            in = READ_END(out);
         }
         posix_spawn_file_actions_addclose(&action, READ_END(out));
 
@@ -195,7 +200,7 @@ int main(int argc, char* argv[]) {
         close(processes[i].out_fd);
         processes[i].finished = 0;
 
-        in = READ_END(out);
+//        in = READ_END(out);
 
         num_processes++;
         i++;
@@ -209,28 +214,40 @@ int main(int argc, char* argv[]) {
     int running_processes = num_processes;
     int exit_status = 0;
     int rc;
+
+    for ( int j = 0; j < num_processes; j++ ) {
+        if (in != processes[j].out_read_fd) {
+            close(processes[j].out_read_fd);
+        }
+    }
+
     while ( running_processes > 0 ) {
-
       // Do some waitpids
-      for ( int j = 0; j < i; j++ ) {
-
-        // Grab whatever you can from stderr for this process
-        while ( ( rd = read(processes[j].err_read_fd, buf, buffer_size) ) > 0 ) {
-            fprintf(stdout, "%s: %s", processes[j].name, buf);
-        }
-        if (rd == 0) {
-            close(processes[j].err_read_fd);
-        }
-
-
-        if ( exit_status == 1 ) {
+      for ( int j = 0; j < num_processes; j++ ) {
+        if ( exit_status == 1 && processes[j].finished == 0) {
           kill( processes[j].pid, SIGKILL);
+        }
+
+        if (in == processes[j].out_read_fd) {
+          if ( read(in, buf, buffer_size) <= 0) {
+            close(in);
+          }
+        }
+
+        while ( ( rd = read(processes[j].err_read_fd, buf, buffer_size) ) > 0 ) {
+          fprintf(stdout, "%s: %.*s\n", processes[j].name, rd, buf);
         }
 
         if ( !processes[j].finished ) {
         // Check to see if any of the processes have ended
         rc = waitpid(processes[j].pid, &processes[j].status, WNOHANG);
+
         if (rc != 0) {
+          while ( ( rd = read(processes[j].err_read_fd, buf, buffer_size) ) > 0 ) {
+            fprintf(stdout, "%s: %.*s\n", processes[j].name, rd, buf);
+          }
+          close(processes[j].err_read_fd);
+
           running_processes--;
           close(processes[j].err_fd);
           processes[j].finished = 1;
@@ -260,6 +277,14 @@ int main(int argc, char* argv[]) {
         }
       }
       usleep(10000);
+    }
+
+    // consume all process' stderr
+    for ( int j = 0; j < i; j++ ) {
+        while ( ( rd = read(processes[j].err_read_fd, buf, buffer_size) ) > 0 ) {
+            fprintf(stdout, "%s: %.*s\n", processes[j].name, rd, buf);
+        }
+        close(processes[j].err_read_fd);
     }
 
     exit(exit_status);

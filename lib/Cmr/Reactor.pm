@@ -30,13 +30,13 @@ use warnings;
 use threads ();
 use threads::shared;
 
-use Thread::Queue ();
+use Thread::Queue 1.03 ();
 use POSIX ();
 use Time::HiRes ();
 
 use File::Basename qw(dirname);
 use Cwd qw(abs_path);
-use lib dirname (abs_path(__FILE__));
+use lib dirname (abs_path(__FILE__))."/..";
 
 use Cmr::StartupUtils ();
 
@@ -55,8 +55,7 @@ use constant {
 };
 
 use constant {
-    TASK => 1,
-    CONFIG_CHANGED => 2,
+    CONFIG_CHANGED => 22839,
     END_THREAD => 12983,
 };
 
@@ -78,57 +77,76 @@ sub start_threads;
 sub thread_main {
     my ($args) = @_;
 
-    my $backlog = $args->{'backlog'};
-    my $parent_queue = $args->{'parent_queue'};
+    my $reactor = $args->{'reactor'};
     my $queue = $args->{'queue'};
+    my $return_queue = $args->{'return_queue'};
+    my $parent_queue = $args->{'parent_queue'};
     my $id = $args->{'id'};
     my $handlers = $args->{'handlers'};
     my $config = $args->{'config'};
 
     my $self = {
         'id'            => $id,
-        'backlog'       => $backlog,
     };
 
-    $args->{'thread_init'}->($self, $config) if $args->{'thread_init'};
+#    Fixme: invoke any _init handlers that are present
+#    $args->{'thread_init'}->($self, $config, $reactor) if $args->{'thread_init'};
 
     while(1) {
         my $task = $queue->dequeue;
-        if ( !$task || !$task->{&MAGIC} ) {
+        if ( !$task ) {
            $parent_queue->enqueue({ID=>$id, TYPE=>TASK_FINISHED});
            next;
         }
 
-        if ( $task->{&MAGIC} == TASK ) {
-            $task->{'backlog'} = $backlog;
-            $handlers->{$task->{'task'}}->($task, $config, $self) if exists($handlers->{$task->{'task'}});
+        if ( exists $task->{&MAGIC} ) {
+            if ( $task->{&MAGIC} == CONFIG_CHANGED ) {
+                $config = $task->{'config'};
+                next;
+            }
+            elsif ( $task->{&MAGIC} == END_THREAD  ) {
+                last;
+            }
+        }
+        else {
+            my @results = $handlers->{$task->{'task'}}->($task, $self, $config, $reactor) if exists($handlers->{$task->{'task'}});
+            if (@results) {
+                $return_queue->enqueue(@results);
+            }
             $parent_queue->enqueue({ID=>$id, TYPE=>TASK_FINISHED});
-        }
-        elsif ( $task->{&MAGIC} == CONFIG_CHANGED ) {
-            $config = $task->{'config'};
-            next;
-        }
-        elsif ( $task->{&MAGIC} == END_THREAD  ) {
-            last;
         }
     }
     $parent_queue->enqueue({ID=>$id, TYPE=>THREAD_FINISHED});
 }
 
-sub init {
-    my ($handlers, $configref, $thread_init, $backlog) = @_;
+sub new {
+    my ($configref, @handlers) = @_;
+
+    my $backlog = &Thread::Queue->new;
+    my $return_queue = &Thread::Queue->new;
+    
+    return &__new($configref, $backlog, $return_queue, @handlers);
+}
+
+sub __new {
+    my ($configref, $backlog, $return_queue, @handlers) = @_;
+
+    my %handlers;
+    for my $handler (@handlers) {
+        %handlers = (%handlers, %{$handler});
+    }
 
     my $running_tasks : shared = 0;
 
     my $worker_ctx = bless {
         'initialized'        => 0,
-        'backlog'            => $backlog // Thread::Queue->new,
+        'backlog'            => $backlog,
+        'return_queue'       => $return_queue,
         'parent_queues'      => [],
-        'handlers'           => $handlers,
+        'handlers'           => \%handlers,
         'running_tasks'      => \$running_tasks,
         'running_threads'    => 0,
         'config'             => $configref,
-        'thread_init'        => $thread_init,
         'max_threads'        => 4,
         'tasks_per_thread'   => 10,
         'max_thread_backlog' => 20,
@@ -147,7 +165,12 @@ sub init {
 
 our $evil_config;
 sub no_config_init {
-    my ($handlers, $max_threads, $tasks_per_thread, $max_thread_backlog, $thread_init) = @_;
+    my ($max_threads, $tasks_per_thread, $max_thread_backlog, @handlers) = @_;
+
+    my %handlers;
+    for my $handler (@handlers) {
+        %handlers = (%handlers, %{$handler});
+    }
 
     $evil_config = {
         'max_threads'        => $max_threads || 4,
@@ -159,13 +182,13 @@ sub no_config_init {
 
     my $worker_ctx = bless {
         'initialized'        => 0,
-        'backlog'            => Thread::Queue->new,
+        'backlog'            => &Thread::Queue->new,
+        'return_queue'       => &Thread::Queue->new,
         'parent_queues'      => [],
-        'handlers'           => $handlers,
+        'handlers'           => \%handlers,
         'running_tasks'      => \$running_tasks,
         'running_threads'    => 0,
         'config'             => \$evil_config,
-        'thread_init'        => $thread_init,
         'max_threads'        => 4,
         'tasks_per_thread'   => 10,
         'max_thread_backlog' => 20,
@@ -348,9 +371,34 @@ sub schedule_tasks {
 }
 
 sub push {
-    my ($self, $task) = @_;
-    $task->{&MAGIC} = TASK;
+    &push_back( @_ );
+}
+
+sub push_front {
+    my ($self,  $task) = @_;
+    $self->{'backlog'}->insert( 0, $task );
+}
+
+sub push_back {
+    my ( $self, $task ) = @_;
     $self->{'backlog'}->enqueue( $task );
+}
+
+sub pop {
+    my ($self, $count) = @_;
+    $count //= 1;
+    if ( (not wantarray) && $count > 1) {
+        warn "pop called in a scalar context with count > 1";
+    }
+
+    my @result;
+
+    my $max_dequeue = $count < $self->{return_queue}->pending() ? $count : $self->{return_queue}->pending();
+    if ($max_dequeue > 0) {
+        @result = $self->{'return_queue'}->dequeue_nb($max_dequeue);
+    }
+
+    return wantarray ? @result : $result[0];
 }
 
 sub pending {
@@ -424,7 +472,8 @@ sub start_threads {
 
         $self->{'threads'}->{$id} = {
             'thread' => threads->create(\&thread_main, {
-                'backlog'       => $self->{'backlog'},
+                'reactor'       => $self,
+                'return_queue'  => $self->{'return_queue'},
                 'parent_queue'  => $parent_queue,
                 'queue'         => $thread_queue,
                 'id'            => $id,

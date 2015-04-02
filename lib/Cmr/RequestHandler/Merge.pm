@@ -27,8 +27,8 @@ use strict;
 use warnings;
 
 sub handle_request_local {
-    my ($self, $task, $config, $input, $output) = @_;
-    return &Cmr::Types::CMR_RESULT_SUCCESS unless ${input};
+    my ($self, $task, $config) = @_;
+    return &Cmr::Types::CMR_RESULT_SUCCESS unless $task->{'input'};
 
     # Assume failure
     my $result = &Cmr::Types::CMR_RESULT_FAILURE;
@@ -36,12 +36,15 @@ sub handle_request_local {
     my $timeout = $task->{'deadline'} - Time::HiRes::gettimeofday;
     if ($timeout < 0) { return $result; }
 
+    my $input = join(' ', @{$task->{'input'}});
+
     my $cmd;
     if ($task->{'in_order'}) {
-        $cmd = "timeout -s KILL ${timeout} cmr-pipe --CMR_PIPE_UID $task->{'uid'} --CMR_PIPE_GID $task->{'gid'} cmr-merge --delimiter $task->{'delimiter'} ${input} : chunky -s 16 --CMR_PIPE_OUT ${output}";
+        $cmd = "timeout -s KILL ${timeout} cmr-pipe --CMR_PIPE_UID $task->{'uid'} --CMR_PIPE_GID $task->{'gid'} curl -s -H 'Accept-Encoding: gzip' $input : gzip -dc : sort : gzip -c : seaweed_set -k $task->{'jid'}/$task->{'output'} -d 1";
     }
     else {
-        $cmd = "timeout -s KILL ${timeout} cmr-pipe --CMR_PIPE_UID $task->{'uid'} --CMR_PIPE_GID $task->{'gid'} chunky -s 4 ${input} : chunky -s 16 --CMR_PIPE_OUT ${output}";
+        $cmd = "timeout -s KILL ${timeout} cmr-pipe --CMR_PIPE_UID $task->{'uid'} --CMR_PIPE_GID $task->{'gid'} curl -s -H 'Accept-Encoding: gzip' $input : seaweed_set -k $task->{'jid'}/$task->{'output'} -d 1";
+#        $cmd = "timeout -s KILL ${timeout} cmr-pipe --CMR_PIPE_UID $task->{'uid'} --CMR_PIPE_GID $task->{'gid'} chunky -s 4 $task->{'input'} : seaweed_set -k $task->{'jid'} $task->{'output'} -d 1";
     }
 
     my $rc = &Cmr::RequestHandler::task_exec($task, $cmd);

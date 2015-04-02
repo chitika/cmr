@@ -1,0 +1,89 @@
+#!/usr/bin/perl
+
+#
+#   Copyright (C) 2014 Chitika Inc.
+#
+#   This file is a part of Cmr
+#
+#   Cmr is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation, either version 3 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+use strict;
+use warnings;
+
+binmode STDIN,  ':utf8';
+binmode STDOUT, ':utf8';
+binmode STDERR, ':utf8';
+use open ':utf8';
+
+use File::Basename qw(dirname);
+use Cwd qw(abs_path);
+use lib  dirname(abs_path(__FILE__))."/../lib";
+
+use Cmr::Seaweed;
+
+use Cmr::StartupUtils ();
+
+my ($log, $config) = Cmr::StartupUtils::script_init({
+    'description' => "Set a file in seaweed",
+    'config' => "/etc/cmr/config.ini",
+    'opts'         => [
+        ['key|k=s',           'key'],
+        ['db|d=i',            'database id',       { default => 2 }],
+        ['prefix|p=s',        'collection prefix', { default => "user" }],
+    ],
+    'no_lock' => 1,
+});
+
+binmode STDIN, ":raw";
+
+my $max_attempts = 3;
+my $attempts = 0;
+
+my $key    = $config->{key} or die("seaweed set missing key");
+my $db     = $config->{db};
+my $prefix = $config->{prefix};
+
+my $fs = &Cmr::Seaweed::new(redis_addr=>$config->{redis_addr}, seaweed_addr=>$config->{seaweed_addr}, db=>$db, prefix=>$prefix);
+my $file = $key;
+
+$file =~ s/\//_/go;
+$file = "/tmp/${file}.gz";
+
+my $size = 0;
+open(OUT, ">${file}");
+binmode OUT;
+while ( my $bytes_read = sysread (STDIN, my $buf, 65535) ) {
+    $size += $bytes_read;
+    print OUT $buf;
+}
+close(OUT);
+
+if ($size>0) {
+    while ($attempts++ < $max_attempts) {
+        my $rc = $fs->set_from_file($key, $file);
+        last if ($rc == 1);
+        sleep 1;
+    }
+}
+
+unlink($file);
+
+if ($attempts >= $max_attempts) {
+    exit(1);
+}
+
+exit(0);
+

@@ -55,7 +55,7 @@ int null_stat (const char *path, struct stat *buf) {
 int main( int argc, char* const argv[] ) {
     int option_index = 0;
     glob_t file_glob;
-    char delimiter = '\002';
+    char delimiter = '\001';
 
     file_glob.gl_stat = null_stat;
     file_glob.gl_lstat = null_stat;

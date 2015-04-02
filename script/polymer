@@ -30,29 +30,44 @@ use Cmr::Client;
 use Cmr::StartupUtils ();
 
 my ($log, $config) = Cmr::StartupUtils::script_init({
+    'description' => "Column Store Map Reduce Client",
     'config' => "/etc/cmr/config.ini",
     'opts'         => [
-        ['verbose|v',       'verbose output'],
-        ['pattern|p=s@',    'regexp pattern to grep for'],
-        ['input|i=s@',      'path to grep in (accepts glob)'],
-        ['output|o=s',      'output path'],
-        ['flags|f=s@',      'flags'],
-        ['force|F',         'force run (will attempt to delete everything in the path specified by output before running)'],
+        ['field|c=s@',          'Column to include in input'],
+        ['input|i=s@',          'input path (accepts glob pattern)'],
+        ['output|o=s',          'output path'],
+        ['include|I=s@',        'include a key value pair - key:value'],
+        ['exclude|E=s@',        'exclude a key value pair - key:value'],
+        ['include-range|R=s@',  'include a key range pair - key:rangelow:rangehigh'],
+        ['exclude-range|X=s@',  'include a key range pair - key:rangelow:rangehigh'],
+        ['mapper|m=s',          'mapper command to invoke on each file batch'],
+        ['reducer|r=s',         'reduce command to invoke on each file batch'],
+        ['category|C=s@',       'category'],
+        ['between|B=s',         'between'],
+        ['servers=s',           'severs'],
+        ['idcs=s',              'idcs'],
+        ['verbose|v',           'verbose output'],
+        ['force|F',             'force run (overwrite output path)'],
     ],
     'no_lock' => 1,
 });
 
+$config->{polymer} = 1;
+
+die "No column specified" unless $config->{'field'};
+die "No input specified" unless $config->{'input'} or ($config->{'category'} and $config->{'between'});
+
+
 my $cmr = Cmr::Client::new($config);
 my $jid = $cmr->{'reactor'}->{'jid'};
-
 $SIG{'INT'} = sub {
-    $cmr->scram(); 
+    $cmr->scram();
     `curl $config->{global}->{seaweed_addr}/col/delete?collection=job_${jid}`;
     `redis-cli -n 1 KEYS "job/${jid}*" | xargs redis-cli -n 1 DEL`;
     `redis-cli -n 1 HDEL job ${jid}`;
 };
-$cmr->grep('patterns' => $config->{'pattern'}); # ~sigh
 
+$cmr->polymer();
 
 `curl $config->{global}->{seaweed_addr}/col/delete?collection=job_${jid}`;
 `redis-cli -n 1 KEYS "job/${jid}*" | xargs redis-cli -n 1 DEL`;

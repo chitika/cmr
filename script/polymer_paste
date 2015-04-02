@@ -1,0 +1,125 @@
+#!/usr/bin/perl
+
+#
+#   Copyright (C) 2014 Chitika Inc.
+#
+#   This file is a part of Cmr
+#
+#   Cmr is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation, either version 3 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+use strict;
+use warnings;
+
+use File::Basename qw(dirname);
+use Cwd qw(abs_path);
+use lib  dirname(abs_path(__FILE__))."/../lib";
+
+use Cmr::Seaweed;
+use Getopt::Long::Descriptive ();
+
+my ($opt, $usage) = Getopt::Long::Descriptive::describe_options(
+  '%c %o this script needs no description',
+  ['path|p=s@', 'input path'],
+  ['field|f=s@', 'input field'],
+  ['batchsize|b=i', 'batch size'],
+);
+
+die "why yuo no give args!" unless ($opt->{'path'} and $opt->{'field'});
+
+my $batchsize = $opt->{'batchsize'} // 80;
+binmode(STDOUT);
+
+my $fs = &Cmr::Seaweed::new();
+my @locations;
+while ( my $path = shift(@{$opt->{'path'}}) ) {
+    my @new_locations = $fs->get_polymer_locations("${path}/*", @{$opt->{'field'}});
+    push @locations, @new_locations;
+}
+
+
+while ( my @batch = splice(@locations, 0, $batchsize) ) {
+    my @columns;
+    my @srcfield;
+    # TODO: handle derived fields
+    for my $group (@batch) {
+        for my $idx (0..$#{$group}) {
+            $columns[$idx] //= [];
+            $srcfield[$idx] //= [];
+            push @{$srcfield[$idx]}, $group->[$idx]->[0];
+            push @{$columns[$idx]}, $group->[$idx]->[1];
+        }
+    }
+
+    my @fds;
+    my $i = 0;
+
+    for my $idx (0 .. $#columns) {
+        my $location = join(' ', @{$columns[$idx]});
+        my $srcfield = $srcfield[$idx]->[0]; ## FIXME: BUG if not all files correspond to the same src field they won't be parsed correctly
+        my $field = $opt->{'field'}->[$idx];
+        my $fd;
+        if ($location and $srcfield eq $field) {
+            open($fd, "curl -s -H 'Accept-Encoding: gzip' $location | gzip -dc |" );
+        }
+        else {
+            if ($srcfield eq 'unparsed') {
+                open($fd, "curl -s -H 'Accept-Encoding: gzip' $location | gzip -dc | perl getfield $field |" );
+            }
+            else {
+                my $subfield = "";
+                do {
+                    my ($removed) = $field =~ s/\.?([^\.]*)$//o;
+                    if ($subfield) {
+                        $subfield = "${removed}.${subfield}";
+                    }
+                    else {
+                        $subfield = $removed;
+                    }
+
+                    if ($srcfield eq $field) {
+                        open($fd, "curl -s -H 'Accept-Encoding: gzip' $location | gzip -dc | perl getfield $subfield |" );
+                        last;
+                    }
+                } while ($field);
+            }
+        }
+        $fds[$i++] = $fd;
+    }
+
+    my $nfds = $#fds;
+    my @elem;
+    $elem[$#fds] = undef;
+    while(1) {
+        my $anydata;
+    
+        for my $idx (0 .. $nfds) {
+            my $fd = $fds[$idx];
+            my $data = <$fd>;
+            $anydata //= $data;
+            $data //= "";
+            chomp ($data);
+            $elem[$idx] = $data;
+        }
+        
+        last unless $anydata;
+        print join('', @elem),"\n";
+    }
+
+    $i = 0;
+    for my $field (@{$opt->{'field'}}) {
+        close($fds[$i++]);
+    }
+}

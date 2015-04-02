@@ -36,7 +36,8 @@ use Time::HiRes ();
 
 use File::Basename qw(dirname);
 use Cwd qw(abs_path);
-use lib dirname (abs_path(__FILE__));
+use lib dirname (abs_path(__FILE__))."/..";
+
 
 use Cmr::StartupUtils ();
 use Cmr::Reactor ();
@@ -56,8 +57,7 @@ use constant {
 };
 
 use constant {
-    TASK => 1,
-    CONFIG_CHANGED => 2,
+    CONFIG_CHANGED => 22839,
     FINISH => 3,
     SCRAM => 4,
     END_THREAD => 12983,
@@ -68,28 +68,32 @@ our $parent_handlers = {
     &THREAD_FINISHED => \&_thread_finished,
 };
 
-sub init;
+sub new;
 sub push;
+sub push_front;
+sub push_back;
+sub pop;
 sub finish;
 sub scram;
 
-sub init {
-    my ($handlers, $config, $thread_init) = @_;
-    my $backlog  = Thread::Queue->new;
+sub new {
+    my ($config, @handlers) = @_;
+
+    my $backlog      = Thread::Queue->new;
+    my $return_queue = Thread::Queue->new;
+
     my $configref = \$config;
-    my $ev = Cmr::Reactor::init( $handlers, $configref, $thread_init, $backlog );
+    my $ev = &Cmr::Reactor::__new( $configref, $backlog, $return_queue, @handlers );
 
     my $dispatcher = bless {
         'reactor'       => $ev,
         'queue'         => Thread::Queue->new,
-        'backlog'       => $backlog,
     };
 
     $dispatcher->{'dispatch'} = threads->create(\&dispatch_main, {
         'reactor'       => $ev,
         'configref'     => $configref,
         'queue'         => $dispatcher->{'queue'},
-        'thread_init'   => $thread_init,
     });
 
     return $dispatcher;
@@ -97,8 +101,23 @@ sub init {
 
 sub push {
     my ($self, $task) = @_;
-    $task->{&MAGIC} = TASK;
-    $self->{'backlog'}->enqueue($task);
+    $self->{'reactor'}->push($task);
+}
+
+sub push_front {
+    my ($self, $task) = @_;
+    $self->{'reactor'}->push_front($task);
+}
+
+sub push_back {
+    my ($self, $task) = @_;
+    $self->{'reactor'}->push_back($task);
+}
+
+sub pop {
+    my ($self, $count) = @_;
+    $count //= 1;
+    return $self->{'reactor'}->pop($count);
 }
 
 sub finish {
@@ -121,18 +140,17 @@ sub pending {
 sub dispatch_main {
     my ($args) = @_;
 
-    my $configref      = $args->{'configref'};
+    my $configref   = $args->{'configref'};
     my $reactor     = $args->{'reactor'};
     my $queue       = $args->{'queue'};
-    my $thread_init = $args->{'thread_init'};
 
     my $nano_interval = ($$configref->{'dispatch_interval'} // 0.1) * 1e9;
 
-my $log = Cmr::StartupUtils::get_logger();
     while ( !$reactor->{'finished'} ) {
-        if (Cmr::StartupUtils::load_config($configref)) {
+
+        if (&Cmr::StartupUtils::load_config($configref)) {
             $nano_interval = ($$configref->{'dispatch_interval'} // 0.1) * 1e9;
-            $reactor->resize();            
+            $reactor->resize();
         }
        
         my $cmd = $queue->dequeue_nb;
@@ -144,8 +162,9 @@ my $log = Cmr::StartupUtils::get_logger();
                 last;
             }
         }
+
         $reactor->dispatch();
-        Time::HiRes::nanosleep($nano_interval);
+        &Time::HiRes::nanosleep($nano_interval);
     }
 }
 

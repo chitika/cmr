@@ -1,3 +1,5 @@
+#!/usr/bin/perl
+
 #
 #   Copyright (C) 2014 Chitika Inc.
 #
@@ -18,30 +20,26 @@
 #   along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-package Cmr::StartupUtils::StartupLogTrap;
-#use parent Cmr::StartupUtils;
-
-## Trapper for messages logged to stderr that should have gone to the logger
-
-our $VERSION = '0.1';
-
 use strict;
 use warnings;
 
-use Log::Log4perl qw(:easy);
-#use Cmr::StartupUtils ();
+binmode STDIN,  ':utf8';
+binmode STDOUT, ':utf8';
+binmode STDERR, ':utf8';
+use open ':utf8';
 
-sub TIEHANDLE {
-    my $class = shift;
-    bless [], $class;
+use File::Basename qw(dirname);
+use Cwd qw(abs_path);
+use lib  dirname(abs_path(__FILE__))."/../lib";
+
+use Cmr::Seaweed;
+
+my $key = $ARGV[0] // die("seaweed set missing key");
+
+my $fs = &Cmr::Seaweed::new();
+my @results = $fs->get($key);
+
+for my $result (@results) {
+    print $$result;
 }
 
-sub PRINT {
-    my $self = shift;
-    $Log::Log4perl::caller_depth++;
-    my $logger = Cmr::StartupUtils::get_logger();
-    $logger->error(@_);
-    $Log::Log4perl::caller_depth--;
-}
-
-1;

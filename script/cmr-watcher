@@ -1,0 +1,354 @@
+#!/usr/bin/perl
+
+#
+#   Copyright (C) 2014 Chitika Inc.
+#
+#   This file is a part of Cmr
+#
+#   Cmr is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation, either version 3 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+use strict;
+use warnings;
+
+use NanoMsg::Raw;
+use JSON::XS ();
+use Date::Manip ();
+use IO::Select ();
+use POSIX ();
+use List::Util ();
+
+use File::Basename qw(dirname);
+use Cwd qw(abs_path);
+use lib  dirname(abs_path(__FILE__))."/../lib";
+use Cmr::Types;
+use Cmr::StartupUtils ();
+
+
+my ($log, $config) = Cmr::StartupUtils::script_init({
+    'description' => 'Collects statistics and caches them for web frontend',
+    'config' => "/etc/cmr/config.ini",
+    'no_lock'=>1,
+});
+
+use constant {
+    MAX_JOBS => 15,
+    MAX_SAMPLES => 60,
+};
+
+sub update_stats;
+sub handle_query;
+
+my $cache = {};
+
+my $cs = nn_socket(AF_SP, NN_SUB);
+nn_setsockopt($cs, NN_TCP, NN_TCP_NODELAY, 1);
+nn_setsockopt($cs, NN_SUB, NN_SUB_SUBSCRIBE, "");
+nn_connect($cs, "$config->{'caster_out'}" );
+
+my $qs = nn_socket(AF_SP, NN_REP);
+nn_bind($qs, "$config->{'watcher'}");
+
+my $cs_fd = unpack 'i', nn_getsockopt($cs, NN_SOL_SOCKET, NN_RCVFD);
+my $qs_fd = unpack 'i', nn_getsockopt($qs, NN_SOL_SOCKET, NN_RCVFD);
+
+my $fd_set = "";
+my $fd_out = "";
+vec($fd_set, $cs_fd, 1) = 1;
+vec($fd_set, $qs_fd, 1) = 1;
+
+my $stats = {};
+
+while(1) {
+    my ($found) = select($fd_out=$fd_set,undef,undef,undef);
+    if (vec($fd_out,$cs_fd,1) == 1) {
+        nn_recv($cs, my $event);
+        update_stats($event);
+        $event = undef;
+    }
+    if (vec($fd_out,$qs_fd,1) == 1) {
+        nn_recv($qs, my $request);
+        nn_send($qs, JSON::XS::encode_json(handle_query($request)));
+        $request = undef;
+    }
+}
+nn_close($cs);
+
+sub update_stats {
+    my ($event) = @_;
+    my ($jid, $json) = split(":", $event,2);
+    my $task = JSON::XS->new->decode($json);
+
+    return if !defined($task->{'user'});
+    return if !defined($task->{'type'});
+
+    my $user = $task->{'user'};
+
+    if ( $task->{'type'} == &Cmr::Types::CMR_CONNECT) {
+        my ($cmd) = $task->{'cmdline'};
+        my $now = time();
+        $stats->{$user} //= {};
+        $stats->{$user}->{'job_status'}->{$jid} = {
+            'start_date'   => POSIX::strftime("%Y-%m-%d %H:%M:%S", gmtime()),
+            'end_date'     => 0,
+            'cmd'          => $cmd,
+            'cached'       => 0,
+            'complete'     => 0,
+            'successes'    => 0,
+            'failures'     => 0,
+            'failed'       => 0,
+            'warnings'     => 0,
+            'timeouts'     => 0,
+            'start_time'   => $now,
+            'running_time' => 0,
+            'last_update'  => $now,
+            'tasks_completed' => 0,
+            'avg_times' => {
+                'grep'       => 0,
+                'stream'     => 0,
+                'map'        => 0,
+                'reduce'     => 0,
+                'cleanup'    => 0,
+                'merge'      => 0,
+            },
+        };
+
+        $stats->{$user}->{'job_data'}->{$jid} = { 'times' => { } };
+
+        foreach my $key (keys %{$Cmr::Types::Watcher}) {
+            my $type = $Cmr::Types::Watcher->{$key};
+            $stats->{$user}->{'job_data'}->{$jid}->{'times'}->{$type} = [];
+        }
+
+        $stats->{$user}->{'task_status'}->{$jid} = {
+            'failures' => [],
+            'rejects'  => [],
+            'timeouts' => [],
+            'errors'   => [],
+        };
+
+        $stats->{$user}->{'jobids'} //= [];
+        push @{$stats->{$user}->{'jobids'}}, $jid;
+
+        if ($user eq "root") {
+            if (scalar(@{$stats->{$user}->{'jobids'}}) > &MAX_JOBS*10) {
+                my $jid = shift(@{$stats->{$user}->{'jobids'}});
+                delete $stats->{$user}->{'job_status'}->{$jid};
+                delete $stats->{$user}->{'job_data'}->{$jid};
+                delete $stats->{$user}->{'task_status'}->{$jid};
+            }
+        } else {
+            if (scalar(@{$stats->{$user}->{'jobids'}}) > &MAX_JOBS) {
+                my $jid = shift(@{$stats->{$user}->{'jobids'}});
+                delete $stats->{$user}->{'job_status'}->{$jid};
+                delete $stats->{$user}->{'job_data'}->{$jid};
+                delete $stats->{$user}->{'task_status'}->{$jid};
+            }
+        }
+        return;
+    }
+
+    return if !defined($stats->{$user});
+    if (! ($jid ~~ @{$stats->{$user}->{'jobids'}})) {
+        # Job is long gone... ignore this event
+        return;
+    }
+
+    my $type = $Cmr::Types::Watcher->{$task->{'type'}} // undef;
+    return if !defined($type);
+    if ($type eq "disconnect") {
+        update_derived_stats($user, $jid);
+        $stats->{$user}->{'job_status'}->{$jid}->{'end_date'} = POSIX::strftime("%Y-%m-%d %H:%M:%S", gmtime());
+        $stats->{$user}->{'job_status'}->{$jid}->{'complete'} = 1;
+        my $json = JSON::XS::encode_json($stats->{$user}->{'job_status'}->{$jid});
+        # $log->info("JOB COMPLETE ($jid) - ${json}\n");
+        return;
+    }
+
+    my $now = time();
+    $stats->{$user}->{'job_status'}->{$jid}->{'last_update'}  = $now;
+
+    my $result = $task->{'result'};
+    return if $result == &Cmr::Types::CMR_RESULT_ACCEPT;
+
+    push @{$stats->{$user}->{'job_data'}->{$jid}->{'times'}->{$type}}, $task->{'elapsed'};
+    if ( scalar(@{$stats->{$user}->{'job_data'}->{$jid}->{'times'}->{$type}}) > &MAX_SAMPLES ) {
+        shift( @{$stats->{$user}->{'job_data'}->{$jid}->{'times'}->{$type}} );
+    }
+
+    if    ( $result == &Cmr::Types::CMR_RESULT_SUCCESS ) {
+        $stats->{$user}->{'job_status'}->{$jid}->{"successes"}++;
+        $stats->{$user}->{'job_status'}->{$jid}->{'tasks_completed'}++;
+    } elsif ( $result == &Cmr::Types::CMR_RESULT_TIMEOUT ) {
+        push (@{$stats->{$user}->{'task_status'}->{$jid}->{'timeouts'}}, $task->{'id'});
+        $stats->{$user}->{'job_status'}->{$jid}->{"timeouts"}++;
+    } elsif ( $result == &Cmr::Types::CMR_RESULT_FAILURE ) {
+        push (@{$stats->{$user}->{'task_status'}->{$jid}->{'failures'}}, $task->{'id'});
+        $stats->{$user}->{'job_status'}->{$jid}->{"failures"}++;
+    } elsif ( $result == &Cmr::Types::CMR_RESULT_JOB_FAILED ) {
+        $stats->{$user}->{'job_status'}->{$jid}->{"failed"} = 1;
+    } elsif ( $result == &Cmr::Types::CMR_RESULT_SERVER_REJECT || $result == &Cmr::Types::CMR_RESULT_WORKER_REJECT ) {
+        $stats->{$user}->{'job_status'}->{$jid}->{'rejects'}++;
+    }
+
+    if ( $task->{'warnings'} && $task->{'warnings'} == 1 ) {
+        push (@{$stats->{$user}->{'task_status'}->{$jid}->{'warnings'}}, $task->{'id'});
+        $stats->{$user}->{'job_status'}->{$jid}->{"warnings"}++;
+        $stats->{$user}->{'job_status'}->{$jid}->{'tasks_completed'}++;
+    }
+}
+
+sub update_derived_stats {
+    my ($user, $jid) = @_;
+    my @jobids = $jid ? ($jid) : @{$stats->{$user}->{'jobids'}};
+    foreach my $jobid (@jobids) {
+        next if $stats->{$user}->{'job_status'}->{$jobid}->{'complete'};
+        if ( $stats->{$user}->{'job_status'}->{$jobid}->{'last_update'} < ( time() - 1920 ) ) { $stats->{$user}->{'job_status'}->{$jobid}->{'complete'} = 1; }
+        $stats->{$user}->{'job_status'}->{$jobid}->{'running_time'} = time() - $stats->{$user}->{'job_status'}->{$jobid}->{'start_time'};
+        foreach my $key (keys %{$Cmr::Types::Watcher}) {
+            my $type = $Cmr::Types::Watcher->{$key};
+            next if ! @{$stats->{$user}->{'job_data'}->{$jobid}->{'times'}->{$type}};
+            $stats->{$user}->{'job_status'}->{$jobid}->{'avg_times'}->{$type} = List::Util::sum( @{$stats->{$user}->{'job_data'}->{$jobid}->{'times'}->{$type}} ) / scalar( @{$stats->{$user}->{'job_data'}->{$jobid}->{'times'}->{$type}} );
+        }
+    }
+}
+
+
+sub handle_query {
+    my ($request) = @_;
+    my ($cmd, @rest) = split("\t", $request);
+
+    if ($cmd eq "get_job_status") {
+        my ($user, $jid) = @rest;
+        return {} unless $user;
+
+        my $response = {};
+        if ($stats->{$user}) {
+            if ( $jid && $stats->{$user}->{'job_status'}->{$jid} ) {
+                update_derived_stats($user, $jid);
+                $response = { "${jid}" => $stats->{$user}->{'job_status'}->{$jid} }; 
+            } elsif (!$jid) {
+                update_derived_stats($user);
+                $response = $stats->{$user}->{'job_status'} || {};
+            }
+        }
+        
+        return $response;
+    }
+
+    if ($cmd eq "get_active_jobs") {
+        my ($user) = @rest;
+        my $response = {};
+
+        my @users = $user ? $user : keys %$stats;
+
+        foreach my $user (@users) {
+            $response->{$user} //= [];
+            foreach my $jid ( @{$stats->{$user}->{'jobids'}} ) {
+                next if $stats->{$user}->{'job_status'}->{$jid}->{'complete'};
+                push @{$response->{$user}}, $jid;
+            }
+        }
+        return $response;
+    }
+
+    if ($cmd eq "get_users") {
+        return [keys %$stats];
+    }
+
+    if ($cmd eq "get_task_status") {
+        my ($user, $jid) = @rest;
+        return {} unless $user;
+        return {} unless $jid;
+
+        my $response = {};
+        if ( $stats->{$user} && $stats->{$user}->{'task_status'}->{$jid}) {
+            $response = $stats->{$user}->{'task_status'}->{$jid};
+        }
+
+        return $response;
+    }
+
+    if ($cmd eq "job_from_cache") {
+        my ($user, $jid, $cmd) = @rest;
+        $stats->{$user} //= {};
+
+        $stats->{$user}->{'job_data'}->{$jid} = {
+            'times' => {
+                'grep'       => [],
+                'stream'     => [],
+                'map'        => [],
+                'reduce'     => [],
+                'cleanup'    => [],
+                'merge'      => [],
+            },
+        };
+
+        $stats->{$user}->{'task_status'}->{$jid} = {
+            'failures' => [],
+            'rejects'  => [],
+            'timeouts' => [],
+            'errors'   => [],
+        };
+
+        $stats->{$user}->{'job_status'}->{$jid} = {
+            'start_date'   => POSIX::strftime("%Y-%m-%d %H:%M:%S", gmtime()),
+            'end_date'     => POSIX::strftime("%Y-%m-%d %H:%M:%S", gmtime()),
+            'cmd'          => $cmd,
+            'cached'       => 1,
+            'complete'     => 1,
+            'successes'    => 0,
+            'failures'     => 0,
+            'warnings'     => 0,
+            'timeouts'     => 0,
+            'start_time'   => time(),
+            'running_time' => 0,
+            'tasks_completed' => 0,
+            'avg_times' => {
+                'grep'       => 0,
+                'stream'     => 0,
+                'map'        => 0,
+                'reduce'     => 0,
+                'cleanup'    => 0,
+                'merge'      => 0,
+            },
+        };
+
+        $stats->{$user}->{'jobids'} //= [];
+        push @{$stats->{$user}->{'jobids'}}, $jid;
+        return {};    
+    }
+
+    if ($cmd eq "set_cache") {
+        my ($key, $value) = @rest;
+        $cache->{$key} = $value;
+        return {};
+    }
+
+    if ($cmd eq "get_cache") {
+        my ($key) = @rest;
+        return {} unless defined $cache->{$key};
+        return {'value'=>$cache->{$key}};
+    }
+
+    if ($cmd eq "delete_cache") {
+        my ($key) = @rest;
+        delete $cache->{$key};
+        return {};
+    }
+
+    return {};
+}
+

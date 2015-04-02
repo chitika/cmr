@@ -1,85 +1,6 @@
 # CMR
 CMR is a perl framework built on top of nanomsg for distributing tasks across a clustered environment. Clients for performing parallel distributed grep, map, or map-reduce tasks have been created to show the capabilities of CMR.
 
-# Dependencies
-* NanoMsg - http://nanomsg.org/
-* gzip - http://www.gzip.org/
-
-And the following perl libraries
-* NanoMsg::Raw
-* JSON::XS
-* Date::Calc
-* Date::Manip
-* IO::Select
-* POSIX
-* List::Util
-* File::Basename
-* Cwd
-* Data::GUID
-* Getopt::Long
-
-All of these dependencies can be resolved by installing the following debian packages
-* libnanomsg0\*
-* libnanomsg-raw-perl\*
-* libdata-guid-perl
-* libdate-calc-perl
-* libjson-xs-perl
-* libgetopt-long-descriptive-perl
-* libdate-manip-perl
-* libconfig-tiny-perl 
-* liblog-log4perl-perl
-* libuuid-perl
-
-\* The Debian repositories currently provide libnanomsg0 and libnanomsg-raw-perl, both required by the cmr-lib Debian package provided. These nanomsg packages are only available in sid but are in the process of being added to testing and backported to Debian Wheezy. Rather than put your system on unstable the preferred method of acquiring these packages is by backporting them. Instructions on backporting debian packages can be found here - https://wiki.debian.org/SimpleBackportCreation
-
-CMR requires a coherent view of a data warehouse from the perspective of all nodes. CMR mandates the use of a POSIX compliant networked or clustered file system such as NFS or Gluster.
-If being installed on a single sytem, only a POSIX compliant file system is required.
-
-# Installation
-Package based (server components):
-
-```
-dpkg -i cmr-lib_0.0.1-1_all.deb cmr-server_0.0.1-1_all.deb
-```
-
-Package based (worker components):
-
-```
-dpkg -i cmr-lib_0.0.1-1_all.deb cmr-worker_0.0.1-1_all.deb cmr-utils_0.0.1-1_amd64.deb
-```
-
-Package based (client components):
-
-```
-dpkg -i cmr-lib_0.0.1-1_all.deb cmr-client_0.0.1-1_all.deb cmr-utils_0.0.1-1_amd64.deb
-```
-
-All components can be installed on the same system. The default configuration is near complete when all components are installed on the same system.
-
-
-Manual (installs everything):
-
-```
-perl Makefile.PL
-make
-make install
-```
-
-# Tested Installation
-CMR has been developed on and has been tested with Debian Wheezy. All dependencies are available directly from Debian repositories.
-Gluster was chosen as the clustered file system and is the only one verified to work well with CMR, although, NFS should work too.
-Additionally, the network interconnecting all CMR nodes and all Gluster nodes during development of CMR was 40Gb/s Infiniband, known as QDR. As such, some utilities in use by CMR may be out of place on a different file system. Namely, the chunky c binary. It should not ca
-use any issues however.
-
-In order to realize the benefits we have seen, a similar environment is recommended.
-
-# Setup & Configuration
-See [Configuration](https://github.com/chitika/cmr/wiki/Configuration)
-
-# Usage
-See [Examples](https://github.com/chitika/cmr/wiki/Examples)
-
-
 # Components
 ```
 cmr-server      Provisions cmr-worker instances with cmr client requests
@@ -131,8 +52,6 @@ cmr --input "<glob_pattern>" --mapper <mapper> [--reducer <reducer>] [--config <
 
 > ##### experimental arguments
 ```
-    -j --join-reducer   reducer to use for join [requires bucket and aggregate parameters to be specified]
-    -B --bucket         split job into buckets to parallelize final reduce [requires aggregates]
     -a --aggregates     number of aggregates in mapped data
     -F --force          force run (overwrite output path)
     -S --sort           sort

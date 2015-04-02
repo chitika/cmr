@@ -25,7 +25,7 @@ use warnings;
 
 use File::Basename qw(dirname);
 use Cwd qw(abs_path);
-use lib dirname (abs_path(__FILE__));
+use lib dirname (abs_path(__FILE__))."/..";
 
 use Cmr::StartupUtils ();
 use Cmr::Types ();
@@ -87,6 +87,7 @@ sub new {
     UUID::unparse($uuid, my $jid);
     $config->{'JOB_ID'} = $jid;
 
+=cut
     unless ($config->{'basepath'}) {
         print STDERR "Error: No basepath configured.\n";
         print STDERR "Please provide a value for basepath in the CMR configuration - /etc/cmr/config.ini\n";
@@ -108,6 +109,7 @@ sub new {
         print STDERR "Data warehouse is missing?\n";
         exit(1);
     }
+=cut
 
     my $basepath      = $config->{'basepath'};
     my $re_basepath   = qr/$basepath/;
@@ -130,6 +132,8 @@ sub new {
         }
     }
 
+    $config->{'output_path'} = $destination;
+=cut
     if ( $destination and not $config->{'stdout'} ) {
         if ( not $config->{'base-relative-path'} and not $destination =~ /^$re_basepath/ ) {
             # base-relative-path is off, and the user specified a destination
@@ -170,7 +174,9 @@ sub new {
         }
 
     }
+=cut
 
+=cut
     unless ( $config->{'no_output_dir'} ) {
         system("mkdir -p $config->{'output_path'}");
         system("mkdir -p $config->{'error_path'}");
@@ -192,11 +198,11 @@ sub new {
             $config->{'reducer'} =~ s|${file}|$config->{'bundle_path'}/${filename}|g if $config->{'reducer'};
         }
     }
-
+=cut
 
     print STDERR "Your JOB_ID is $jid\n" if $config->{'verbose'};
 
-    $config->{'max_task_errors'} //= 16;
+    $config->{'max_task_errors'} //= 160000;
 
     my $obj = {
         'config'                => $config,
@@ -297,16 +303,17 @@ sub finish {
     if ( $self->{'num_task_errors'} > $self->{'config'}->{'max_task_errors'} ) {
         my $excess_errors = $self->{'num_task_errors'} - $self->{'config'}->{'max_task_errors'};
         print STDERR "Suppressed ${excess_errors} errors due to exceeding configured max_task_errors ($self->{'config'}->{'max_task_errors'})\n";
-        if ($self->{'err_fd'}) {
-            my $fd = $self->{'err_fd'};
-            print $fd    "Suppressed ${excess_errors} errors due to exceeding configured max_task_errors ($self->{'config'}->{'max_task_errors'})\n";
-        }
+#        if ($self->{'err_fd'}) {
+#            my $fd = $self->{'err_fd'};
+#            print $fd    "Suppressed ${excess_errors} errors due to exceeding configured max_task_errors ($self->{'config'}->{'max_task_errors'})\n";
+#        }
     }
 
-    if ($self->{'err_fd'}) {
-        close($self->{'err_fd'});
-    }
+#    if ($self->{'err_fd'}) {
+#        close($self->{'err_fd'});
+#    }
 
+=cut
     if ( $self->{'config'}->{'no_output_dir'} ) {
         # Special case - no output generated
     }
@@ -333,6 +340,7 @@ sub finish {
         # Remove the error path if it is empty
         system( "find '$self->{'error_path'}' -maxdepth 0 -empty -exec rmdir  {} \\;" );
     }
+=cut
 }
 
 
@@ -671,12 +679,12 @@ sub finish_task {
                     }
                 }
             }
-            elsif ( $task->{'destination'} ) {
+            elsif ( $task->{'output'} ) {
                 # Destination specified locally
-                my $file = sprintf("%s/%s", $self->{'config'}->{'basepath'}, $task->{'destination'});
-                $file =~ s/\/+/\//go;
+#                my $file = sprintf("%s/%s", $self->{'config'}->{'basepath'}, $task->{'output'});
+#                $file =~ s/\/+/\//go;
 
-                CORE::push @{$self->{'job_output'}},  $file;
+                CORE::push @{$self->{'job_output'}},  $task->{'output'};
             }
 
         } # unlock
@@ -687,18 +695,20 @@ sub finish_task {
         if ($task->{'input'}) {
             $error_prefix .= "Input Files: ";
             for my $file (@{$task->{'input'}}) {
-                $error_prefix .= "$self->{'config'}->{'basepath'}/$file  ";
+#                $error_prefix .= "$self->{'config'}->{'basepath'}/$file  ";
+                $error_prefix .= "$file  ";
             }
             $error_prefix .= "\n";
         }
 
-        unless ($self->{'err_fd'}) {
-            my $error_file = "$self->{'config'}->{'error_path'}/error.log";
-            open($self->{'err_fd'}, '>'.$error_file);
-        }
-        my $fd = $self->{'err_fd'};
+# FIXME: error.log
+#        unless ($self->{'err_fd'}) {
+#            my $error_file = "$self->{'config'}->{'error_path'}/error.log";
+#            open($self->{'err_fd'}, '>'.$error_file);
+#        }
+#        my $fd = $self->{'err_fd'};
+#        print $fd $error_prefix . $comp->{'errors'};
 
-        print $fd $error_prefix . $comp->{'errors'};
         print STDERR $error_prefix . $comp->{'errors'};
         print STDERR "\n";
     }
@@ -728,6 +738,37 @@ sub resubmit_task {
     if ( $comp->{'result'} == &Cmr::Types::CMR_RESULT_TIMEOUT 
     or   $comp->{'result'} == &Cmr::Types::CMR_RESULT_FAILURE ) {
         $log->debug("Timeout triggered task resubmit! Client $Cmr::Types::Task->{$task->{'type'}} Task [$task->{'jid'}:$task->{'id'}] returned result $Cmr::Types::Result->{$comp->{'result'}}");
+
+    if ( $comp->{'errors'} and $self->{'num_task_errors'} < $self->{'config'}->{'max_task_errors'} ) {
+        my $error_prefix = "Encountered errors during $Cmr::Types::Task->{$task->{'type'}} task\n";
+        if ($task->{'input'}) {
+            $error_prefix .= "Input Files: ";
+            for my $file (@{$task->{'input'}}) {
+#                $error_prefix .= "$self->{'config'}->{'basepath'}/$file  ";
+                $error_prefix .= "$file  ";
+            }
+            $error_prefix .= "\n";
+        }
+
+# FIXME: error log
+#        unless ($self->{'err_fd'}) {
+#            my $error_file = "$self->{'config'}->{'error_path'}/error.log";
+#            open($self->{'err_fd'}, '>'.$error_file);
+#        }
+#        my $fd = $self->{'err_fd'};
+#        print $fd $error_prefix . $comp->{'errors'};
+
+        print STDERR $error_prefix . $comp->{'errors'};
+        print STDERR "\n";
+    }
+
+    if ( $comp->{'errors'} ) {
+        if ( $self->{'num_task_errors'} == $self->{'config'}->{'max_task_errors'} ) {
+            print STDERR "max_task_errors ($self->{'config'}->{'max_task_errors'}) exceeded suppressing subsequent errors\n";
+        }
+        $self->{'num_task_errors'}++;
+    }
+
 
         $task->{'failures'}++;
         $task->{'timeout'} += ( $self->{'config'}->{'retry_timeout'} // $self->{'config'}->{'retry_timeout'} );

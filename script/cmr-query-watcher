@@ -1,0 +1,67 @@
+#!/usr/bin/perl
+
+#
+#   Copyright (C) 2014 Chitika Inc.
+#
+#   This file is a part of Cmr
+#
+#   Cmr is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation, either version 3 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+use strict;
+use warnings;
+
+use NanoMsg::Raw;
+use Date::Manip ();
+use IO::Select ();
+use JSON::XS ();
+
+use File::Basename qw(dirname);
+use Cwd qw(abs_path);
+use lib  dirname(abs_path(__FILE__))."/../lib";
+use Cmr::StartupUtils ();
+
+my $cmd = "";
+my $user = "";
+my $jobid = "";
+
+if ( scalar(@ARGV) < 1 ) {
+    print "Usage: perl query-watcher.pl <cmd> [<user> <jobid>]\n";
+    exit(1);
+}
+
+if (@ARGV) { $cmd = shift @ARGV; }
+if (@ARGV) { $user = shift @ARGV; }
+if (@ARGV) { $jobid = shift @ARGV; }
+
+die "No command specified" if ! $cmd; 
+
+#    'config' => "/etc/cmr/config.ini",
+
+my ($log, $config) = Cmr::StartupUtils::script_init({
+    'config' => "./config.ini",
+    'no_lock'=>1,
+});
+
+my $request = "${cmd}\t${user}\t${jobid}";
+
+my $qs = nn_socket(AF_SP, NN_REQ);
+nn_setsockopt($qs, NN_TCP, NN_TCP_NODELAY, 1);
+nn_connect($qs, "$config->{'watcher'}" );
+
+nn_send($qs, $request);
+nn_recv($qs, my $buf);
+
+print "$buf\n";

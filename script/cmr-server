@@ -40,14 +40,6 @@ my ($log, $config) = Cmr::StartupUtils::script_init({
    'no_lock' => 1,
 });
 
-unless ($config->{'basepath'}) { die "No basepath configured"; }
-my $rc = opendir(my $dir, $config->{'basepath'});
-if (!$rc) { die "basepath check failed"; }
-my @contents =  grep (!/^\./o, readdir($dir));
-closedir($dir);
-die "basepath is empty... datapocalypse?" unless @contents;
-
-
 my $work_request;
 my %time_elapsed_avg  :shared;
 my %time_elapsed      :shared;
