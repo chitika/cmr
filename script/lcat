@@ -1,0 +1,149 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+# Listing script for seaweed warehouse
+# Also used for bash completion
+
+use strict;
+use warnings;
+
+use File::Basename qw(dirname);
+use Cwd qw(abs_path);
+use lib  dirname(abs_path(__FILE__))."/../lib";
+
+use Cmr::Seaweed ();
+use Cmr::StartupUtils ();
+my ($log, $config) = Cmr::StartupUtils::script_init({
+    'description' => "cat warehouse contents",
+    'config' => "/etc/cmr/config.ini",
+    'opts' => [
+        ['bash-complete', '** Being invoked for bash completion **'],
+    ],
+    'allow_leftover_args' => 1,
+    'no_lock' => 1,
+});
+
+my $fs = &Cmr::Seaweed::new(redis_addr=>$config->{redis_addr}, seaweed_addr=>$config->{seaweed_addr});
+
+my $bash_completion = $config->{'bash-complete'};
+my $location = "";
+
+if (@ARGV) {
+    $location = $ARGV[0];
+}
+
+my $complete;
+my $incomplete;
+
+$location =~ s/(?<!\\)\*/.*/go;
+while ( $location =~ /(?<!\\){.*?(?<!\\)}/o ) {
+    my ($curly) = $location =~ /((?<!\\){.*?(?<!\\)})/o;
+    $curly =~ s/(?<!\\),/|/go;
+    $curly =~ s/^(?<!\\){/(/o;
+    $curly =~ s/(?<!\\)}$/)/o;
+    $location =~ s/(?<!\\){.*?(?<!\\)}/$curly/o;
+}
+
+
+if ($location =~ /(.*)\/([^\/]*)/) {
+    $complete = $1;
+    $incomplete = $2;
+}
+else {
+    $complete = "";
+    $incomplete = $location;
+}
+
+$incomplete =~ s/\\\=/=/go;
+$complete   =~ s/\\\=/=/go;
+
+my @mapping;
+if (!$bash_completion) {
+    if ("${complete}/${incomplete}" =~ /\.[^\/]*$/) {
+        # might be a complete file path?
+        @mapping = $fs->list("${complete}/${incomplete}.*");
+
+        if (scalar(@mapping) == 1 and 
+            $mapping[0]->[1] =~ /^http/ ) {
+            my ($file, $location) = @{$mapping[0]};
+            system("curl -s -H 'Accept-Encoding: gzip' $location | gzip -dc");
+            exit(0);
+        }
+    }
+}
+
+if ($complete) {
+    @mapping = $fs->list("${complete}/${incomplete}.*");
+}
+else {
+    @mapping = $fs->list("${incomplete}.*");
+}
+
+if (scalar(@mapping) == 1 and
+    (  ($complete and $mapping[0]->[0] eq "$complete/$incomplete")
+    or ($mapping[0]->[0] eq $incomplete) )
+) {
+    # incomplete portion of path was not ambiguous
+    if ($complete) {
+        $complete = "$complete/$incomplete";
+    }
+    else {
+        $complete = $incomplete
+    }
+    $incomplete = "";
+    @mapping = $fs->list("${complete}/.*");
+}
+
+for my $item (@mapping) {
+    my ($file, $location) = @$item;
+    if ($incomplete) {
+        $file =~ /\/(?:${incomplete})[^\/]*/o;
+    }
+
+if ($bash_completion) {
+
+    # Is it a listing or just a completion?
+    my $LISTING = 1;
+    if ($bash_completion) {
+        if ( $ARGV[1] eq '9' ) { # Not a listing
+             $LISTING = 0;
+        }
+    }
+
+    # Double escape things because bash is going to unescape them an extra time :roll-eyes:
+    $file =~ s/\=/\\\\=/go;
+    if ($location) {
+        if (not $LISTING) {
+            print "$file", "\n";
+            print "${file}this_is_@#&^!@", "\n";
+        }
+        else {
+            my ($filename) = $file =~ /([^\/]*)$/o;
+            print "$filename\n";
+        }
+    }
+    else {
+        if (not $LISTING) {
+            print "$file/", "\n";
+            print "$file/this_is_@#&^!@", "\n";
+        }
+        else {
+            my ($filename) = $file =~ /([^\/]*)$/o;
+            print $filename, "\n";
+        }
+    }
+}
+else {
+    $file =~ s/\=/\\=/go;
+    if ($location) {
+        system("curl -s -H 'Accept-Encoding: gzip' $location | gzip -dc");
+    }
+    else {
+        print $file, "\n";
+    }
+}
+
+}
+
