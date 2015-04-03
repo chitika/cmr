@@ -50,6 +50,8 @@ WriteMakefile(
         'script/seaweed_get',
         'script/seaweed_set',
         'script/seaweed_merge',
+        'script/lw',
+        'script/lcat',
     ],
     'PREREQ_PM' => {
         'NanoMsg::Raw'      => 0,

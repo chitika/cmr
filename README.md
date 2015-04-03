@@ -1,5 +1,30 @@
-# CMR
+# CMR - SeaweedFS edition
 CMR is a perl framework built on top of nanomsg for distributing tasks across a clustered environment. Clients for performing parallel distributed grep, map, or map-reduce tasks have been created to show the capabilities of CMR.
+
+# Warehouse requirements
+```
+SeaweedFS - used as warehouse document store
+Redis     - used as warehouse index
+```
+
+# Storing files in the warehouse
+lib/Cmr/Seaweed.pm provides APIs for accessing the warehouse, the easiest and most reliable way of storing files
+in the warehouse is by using its set_from_file method which takes a file from local disk and stores it at the requested 
+warehouse key.
+
+```
+use lib 'lib/Cmr';
+use Seaweed ();
+$fs = &Seaweed::new(redis_addr => $redis_addr, seaweed_addr => $seaweed_addr);
+$fs->set_from_file($warehouse_key, $file_name);
+```
+
+# Using stored files in Cmr Jobs
+The --input flag is now used to specify a pattern that is matched against the keys in the warehouse index. If a file is inserted with a key "2015-01-01/important_data_01" it can be used in cmr by specifying the input pattern --input "2015-01-01/important_data_01". Likewise if many files in the form "2015-01-01/important_data_xx" all of them can be used as input by specifying a glob --input "2015-01-01/important_data_*".
+
+# Listing warehouse contents
+The scripts lw and lcat can be used to list and cat the contents of the warehouse, they accept the same glob patterns as cmr. bashrc/warehouse-utils.bashrc provides the hooks necessary for lw an lcat to have autocomplete functionality in bash, which is extremely helpful when exploring the warehouse.
+
 
 # Components
 ```
