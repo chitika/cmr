@@ -157,7 +157,6 @@ sub grep {
     print STDERR "Grep Started\n" if $args{'verbose'};
 
     my $part_id = 0;
-#    my @paths = _reduce_input_set($args{'input'});
     my @paths = @{$args{'input'}};
 
     for my $path (@paths) {
@@ -367,8 +366,6 @@ sub hierarchical_merge {
             my @task_files = @input[$index..$eindex];
             my @batch = map { $self->{'job_index'}->get_locations("$self->{'reactor'}->{'jid'}/$_"); } @task_files;
 
-#            map { s/^$args{'basepath'}//o; $_; } @task_files;
-
             $self->{'reactor'}->push({
                 'type'          =>  &Cmr::Types::CMR_MERGE,
                 'input'         =>  \@batch,
@@ -393,7 +390,6 @@ sub hierarchical_merge {
         print STDERR "Starting Final Merge\n";
 
         my @task_files = @input[0..$#input];
-#        map { s/^$args{'basepath'}//o; $_; } @task_files;
 
         my @batch = map { $self->{'job_index'}->get_locations("$self->{'reactor'}->{'jid'}/$_"); } @task_files;
 
