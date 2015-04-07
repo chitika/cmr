@@ -1,0 +1,102 @@
+From 7fa42bdf5ba7dfc8402f975b4972b946c6612b38 Mon Sep 17 00:00:00 2001
+From: Nickolas Wood <nwood@proteus>
+Date: Tue, 13 Jan 2015 16:18:14 -0500
+Subject: [PATCH] CHITIKA
+
+---
+ go/storage/store.go                                 |  2 +-
+ go/topology/collection.go                           | 14 ++++++++++++++
+ go/weed/weed_server/master_server.go                |  1 +
+ go/weed/weed_server/master_server_handlers_admin.go | 10 ++++++++++
+ go/weed/weed_server/volume_server_handlers_admin.go |  4 ----
+ 5 files changed, 26 insertions(+), 5 deletions(-)
+
+diff --git a/go/storage/store.go b/go/storage/store.go
+index 7e2b230..2428177 100644
+--- a/go/storage/store.go
++++ b/go/storage/store.go
+@@ -214,7 +214,7 @@ func (l *DiskLocation) loadExistingVolumes() {
+ 			if !dir.IsDir() && strings.HasSuffix(name, ".dat") {
+ 				collection := ""
+ 				base := name[:len(name)-len(".dat")]
+-				i := strings.Index(base, "_")
++				i := strings.LastIndex(base, "_")
+ 				if i > 0 {
+ 					collection, base = base[0:i], base[i+1:]
+ 				}
+diff --git a/go/topology/collection.go b/go/topology/collection.go
+index 5437ffd..63a76de 100644
+--- a/go/topology/collection.go
++++ b/go/topology/collection.go
+@@ -13,6 +13,20 @@ type Collection struct {
+ 	storageType2VolumeLayout *util.ConcurrentReadMap
+ }
+ 
++func (col *Collection) GetVolumeLayout() interface{} {
++	m := make(map[string]interface{})
++	for _, vol_layout := range col.storageType2VolumeLayout.Items {
++		var layout = make(map[string]interface{})
++		if vol_layout != nil {
++			for vol_id, location := range vol_layout.(*VolumeLayout).vid2location {
++				layout[vol_id.String()] = location.list
++			}
++		}
++		m[col.Name] = layout
++	}
++	return m
++}
++
+ func NewCollection(name string, volumeSizeLimit uint64) *Collection {
+ 	c := &Collection{Name: name, volumeSizeLimit: volumeSizeLimit}
+ 	c.storageType2VolumeLayout = util.NewConcurrentReadMap()
+diff --git a/go/weed/weed_server/master_server.go b/go/weed/weed_server/master_server.go
+index 056b1fe..7e336e4 100644
+--- a/go/weed/weed_server/master_server.go
++++ b/go/weed/weed_server/master_server.go
+@@ -73,6 +73,7 @@ func NewMasterServer(r *mux.Router, port int, metaFolder string,
+ 	r.HandleFunc("/{fileId}", ms.redirectHandler)
+ 	r.HandleFunc("/stats/counter", guard.Secure(statsCounterHandler))
+ 	r.HandleFunc("/stats/memory", guard.Secure(statsMemoryHandler))
++	r.HandleFunc("/col/lookup", ms.proxyToLeader(guard.Secure(ms.collectionLookupHandler)))
+ 
+ 	ms.Topo.StartRefreshWritableVolumes(garbageThreshold)
+ 
+diff --git a/go/weed/weed_server/master_server_handlers_admin.go b/go/weed/weed_server/master_server_handlers_admin.go
+index 4d304ef..d7f1747 100644
+--- a/go/weed/weed_server/master_server_handlers_admin.go
++++ b/go/weed/weed_server/master_server_handlers_admin.go
+@@ -17,6 +17,16 @@ import (
+ 	"github.com/golang/protobuf/proto"
+ )
+ 
++func (ms *MasterServer) collectionLookupHandler(w http.ResponseWriter, r *http.Request) {
++	collection, ok := ms.Topo.GetCollection(r.FormValue("collection"))
++	if !ok {
++		writeJsonQuiet(w, r, http.StatusNotFound, map[string]interface{}{"error": "collection " + r.FormValue("collection") + "does not exist!"})
++		return
++	}
++
++	writeJsonQuiet(w, r, http.StatusOK, collection.GetVolumeLayout())
++}
++
+ func (ms *MasterServer) collectionDeleteHandler(w http.ResponseWriter, r *http.Request) {
+ 	collection, ok := ms.Topo.GetCollection(r.FormValue("collection"))
+ 	if !ok {
+diff --git a/go/weed/weed_server/volume_server_handlers_admin.go b/go/weed/weed_server/volume_server_handlers_admin.go
+index 1581a57..8df6fb9 100644
+--- a/go/weed/weed_server/volume_server_handlers_admin.go
++++ b/go/weed/weed_server/volume_server_handlers_admin.go
+@@ -27,10 +27,6 @@ func (vs *VolumeServer) assignVolumeHandler(w http.ResponseWriter, r *http.Reque
+ }
+ 
+ func (vs *VolumeServer) deleteCollectionHandler(w http.ResponseWriter, r *http.Request) {
+-	if "benchmark" != r.FormValue("collection") {
+-		glog.V(0).Infoln("deleting collection =", r.FormValue("collection"), "!!!")
+-		return
+-	}
+ 	err := vs.store.DeleteCollection(r.FormValue("collection"))
+ 	if err == nil {
+ 		writeJsonQuiet(w, r, http.StatusOK, map[string]string{"error": ""})
+-- 
+2.1.4
+

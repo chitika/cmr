@@ -3,9 +3,15 @@ CMR is a perl framework built on top of nanomsg for distributing tasks across a 
 
 # Warehouse requirements
 ```
-SeaweedFS - used as warehouse document store
-Redis     - used as warehouse index
+SeaweedFS (patched) - used as warehouse document store
+Redis               - used as warehouse index
 ```
+
+# Patching SeaweedFS
+Grab a copy of https://github.com/chrislusf/weed-fs
+Apply the patch from CMR patch directory to SeaweedFS using git-am
+
+The patch has been tested against SeaweedFS at ref 996a1789e8ecb0254e87f8da7066813fdbf1df30
 
 # Storing files in the warehouse
 lib/Cmr/Seaweed.pm provides APIs for accessing the warehouse, the easiest and most reliable way of storing files
