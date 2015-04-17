@@ -38,7 +38,7 @@ sub handle_request_local {
 
     my $cmd;
     if ($task->{'in_order'}) {
-        $cmd = "timeout -s KILL ${timeout} cmr-pipe --CMR_PIPE_UID $task->{'uid'} --CMR_PIPE_GID $task->{'gid'} cmr-merge ${input} : chunky -s 16 --CMR_PIPE_OUT ${output}";
+        $cmd = "timeout -s KILL ${timeout} cmr-pipe --CMR_PIPE_UID $task->{'uid'} --CMR_PIPE_GID $task->{'gid'} cmr-merge --delimiter $task->{'delimiter'} ${input} : chunky -s 16 --CMR_PIPE_OUT ${output}";
     }
     else {
         $cmd = "timeout -s KILL ${timeout} cmr-pipe --CMR_PIPE_UID $task->{'uid'} --CMR_PIPE_GID $task->{'gid'} chunky -s 4 ${input} : chunky -s 16 --CMR_PIPE_OUT ${output}";

@@ -42,10 +42,10 @@ my ($log, $config) = Cmr::StartupUtils::script_init({
         ['input|i=s@',          'input path (accepts glob pattern)'],
         ['output|o=s',          'output path'],
         ['bundle|b=s@',         'bundle file with job'],
-        ['bucket|B',            'split job into buckets to parallelize final reduce [requires aggregates]'],
-        ['aggregates|a=i',      'number of aggregates in mapped data'],
         ['force|F',             'force run (Will attempt to delete everything in the path specified by output before running)'],
-        ['sort|S',              'sort'],
+        ['bucket|B',            '[experimental] [bucket] split job into buckets to partition reduce'],
+        ['delimiter|d=s',       '[experimental] [bucket] delimiter used to seperate key from aggregates'],
+
     ],
     'no_lock' => 1,
 });

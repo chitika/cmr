@@ -27,10 +27,8 @@
 
 static struct option long_options[] = {
     {.name = "destination",    .has_arg = required_argument, .flag = 0, .val = 'd'},
-    {.name = "depth",          .has_arg = required_argument, .flag = 0, .val = 'D'},
+    {.name = "delimiter",      .has_arg = required_argument, .flag = 0, .val = 'x'},
     {.name = "prefix",         .has_arg = required_argument, .flag = 0, .val = 'p'},
-    {.name = "num-key-fields", .has_arg = required_argument, .flag = 0, .val = 'k'},
-    {.name = "num-aggregates", .has_arg = required_argument, .flag = 0, .val = 'a'},
     {.name = "num-partitions", .has_arg = required_argument, .flag = 0, .val = 'n'},
     {.name = "map-id",         .has_arg = required_argument, .flag = 0, .val = 'm'},
     {.name = "sort",           .has_arg = no_argument,       .flag = 0, .val = 'S'},
@@ -38,10 +36,10 @@ static struct option long_options[] = {
     {.name = "join",           .has_arg = no_argument,       .flag = 0, .val = 'j'},
     {0,0,0,0},
 };
-static char short_options[] = "d:D:p:k:a:n:m:Ssj";
+static char short_options[] = "d:D:x:p:k:a:n:m:Ssj";
 
 void usage() {
-    fprintf(stderr, "Usage: <input-stream> | genkey -a <num-aggregates> -n <num-partitions> -m <map-id> [-p <prefix> -d <depth>]\n");
+    fprintf(stderr, "Usage: <input-stream> | cmr-bucket -x <delimiter> -d <destination folder> -n <num-partitions> -m <map-id> [-p <prefix> -s <sort>]\n");
 }
 
 // Because omg pipe magic is unreadable
@@ -53,11 +51,9 @@ void usage() {
 int main( int argc, char* const argv[] ) {
     const char* prefix = "part";
     const char* destination = ".";
+    char delimiter = '\002';
 
-    int depth = 0;
     int option_index = 0;
-    int num_aggregates = 0;
-    int num_key_fields = 0;
     int num_partitions = -1;
     int map_id = -1;
     int join = 0;
@@ -71,25 +67,11 @@ int main( int argc, char* const argv[] ) {
             case 'd': // destination
                 destination = optarg;
                 break;
-            case 'D': // depth
-                depth = atoi(optarg);
+            case 'x': // delimiter
+                delimiter = optarg[0];
                 break;
             case 'p': // prefix
                 prefix = optarg;
-                break;
-            case 'k': //num-key-fields
-                if (num_aggregates != 0) {
-                    fprintf(stderr, "Specify only one of the following: [num-key-fields|num-aggregates]\n");
-                    exit(1);
-                }
-                num_key_fields = atoi(optarg);
-                break;
-            case 'a': // num-aggregates
-                if (num_key_fields != 0) {
-                    fprintf(stderr, "Specify only one of the following: [num-key-fields|num-aggregates]\n");
-                    exit(1);
-                }
-                num_aggregates = atoi(optarg);
                 break;
             case 'n': // num-partitions
                 num_partitions = atoi(optarg);
@@ -131,7 +113,7 @@ int main( int argc, char* const argv[] ) {
     char *sort_bin_path = (char*)malloc(256);
     sprintf(sort_bin_path, "/usr/bin/sort");
     char *sort_arg = (char*)malloc(256);
-    sprintf(sort_arg, "--buffer-size=4M");
+    sprintf(sort_arg, "--buffer-size=16M");
 
 
     pid_t pids[1024];
@@ -160,10 +142,10 @@ int main( int argc, char* const argv[] ) {
         failed = 0;
         nagg = 0;
         nkey = 0;
+        joinkey_pos = buf;
 
         if (strip_joinkey) {
-            joinkey_pos = buf;
-            while(joinkey_pos[0] != '\002') {
+            while(joinkey_pos[0] != delimiter) {
                 joinkey_pos++;
                 if (joinkey_pos > buf+rd) { failed = 1; break; }
             }
@@ -173,28 +155,17 @@ int main( int argc, char* const argv[] ) {
 
         if (join) {
             pos = buf;
-            while(pos[0] != '\002') {
+            while(pos[0] != delimiter) {
+                pos++;
+                if (pos > buf+rd) { failed = 1; break; }
+            }
+        } else {
+            pos = joinkey_pos;
+            while(pos[0] != delimiter) {
                 pos++;
                 if (pos > buf+rd) { failed = 1; break; }
             }
         }
-        else if (num_aggregates > 0) {
-            pos = buf+rd;
-            while(nagg<num_aggregates) {
-                if (pos <= buf) { failed = 1; break; }
-                if (pos[0] == '\001') { nagg++; } 
-                pos--;
-            }
-        }
-        else if (num_key_fields > 0) {
-            pos = buf;
-            while(nkey<num_key_fields) {
-                if (pos > buf+rd) { failed = 1; break; }
-                if (pos[0] == '\001') { nkey++; } 
-                pos++;
-            }
-        }
-
         if (failed) { continue; }
 
         if (strip_joinkey) {
@@ -220,7 +191,7 @@ int main( int argc, char* const argv[] ) {
 
 
             // -- Open up the output file
-            sprintf(path, "%s/%s-%d-%d-%d", destination, prefix, map_id, depth, out_id);
+            sprintf(path, "%s/%s-%d-%d", destination, prefix, map_id, out_id);
             int fd = open( path, O_WRONLY|O_CREAT, S_IRUSR|S_IWUSR|S_IXUSR|S_IRGRP|S_IXGRP|S_IROTH|S_IXOTH );
 
             if (sort) {
@@ -286,9 +257,6 @@ int main( int argc, char* const argv[] ) {
         else {
             write( write_fds[out_id], buf, rd );
         }
-
-        // Bump pos on to next line/field/etc.
-        pos++;
     }
 
     // Done processing, close all of our write fds
