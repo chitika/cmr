@@ -132,16 +132,15 @@ sub get_ranges {
             my @mid_start = (@d,$s2,@thresh_lo[$i .. $#thresh_lo]);
             my @mid_end   = (@d,$e2,@thresh_hi[$i .. $#thresh_hi]);
 
+            if ( @start ~~ @thresh_lo[$i .. $#thresh_lo] || $side == &MIDDLE ) {
+                @mid_start = (@d,$s,@thresh_lo[$i .. $#thresh_lo]);
+            }
+
             # make sure we're using properly formatted isodate
             for my $i (1 .. $#mid_start) {
                 $mid_start[$i] = ($mid_start[$i] < 10) ? "0".int($mid_start[$i]) : $mid_start[$i];
                 $mid_end[$i]   = ($mid_end[$i] < 10)   ? "0".int($mid_end[$i])   : $mid_end[$i];
             }
-
-            if ( @start ~~ @thresh_lo[$i .. $#thresh_lo] || $side == &MIDDLE ) {
-                @mid_start = (@d,$s,@thresh_lo[$i .. $#thresh_lo]);
-            }
-
 
             if (fmtdate(@mid_start) le fmtdate(@mid_end)) {
                 push @results, [\@mid_start, \@mid_end];
